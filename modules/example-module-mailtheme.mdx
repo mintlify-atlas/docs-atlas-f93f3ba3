@@ -1,7 +1,7 @@
 ---
-title: "Create a Custom Mail Theme for PrestaShop Transactional Emails"
+title: "Build a Custom Twig Mail Theme for PrestaShop Emails"
 sidebarTitle: "Mail Theme"
-description: "Build a custom Twig-based mail theme with dark mode support, extend existing mail layouts, and apply dynamic color transformations to PrestaShop transactional emails."
+description: "Build a Twig-based mail theme with dark mode, extend existing mail layouts, and apply dynamic color transformations to PrestaShop transactional emails."
 ---
 
 PrestaShop's transactional email system is built on Twig layouts. Each **theme** is a folder of Twig templates organised into sub-directories, and a module can contribute entirely new themes, add layouts to existing themes, replace specific core layouts, and transform the rendered HTML before delivery. The `example_module_mailtheme` module demonstrates all four capabilities through a `dark_modern` theme that extends the built-in `modern` theme with customised dark-mode colors, a configuration page for dynamic color settings, and a post-render color transformation.
@@ -222,7 +222,7 @@ These keys match exactly the Twig variable names used in the layout templates.
 
 ## `CustomMessageColorTransformation`
 
-The transformation class extends `AbstractTransformation` and implements `MailTemplateTransformationInterface`. It receives the fully rendered HTML string, parses it with Symfony's `DomCrawler`, and applies inline styles:
+The transformation class extends `AbstractTransformation` (which itself implements `MailTemplateTransformationInterface`). It receives the fully rendered HTML string, parses it with Symfony's `DomCrawler`, and applies inline styles:
 
 ```php
 // src/MailTemplate/Transformation/CustomMessageColorTransformation.php
@@ -310,7 +310,7 @@ class DarkThemeSettings
         return empty($settings) ? $this->getDefaultSettings() : $settings;
     }
 
-    public function saveSettings(array $settings): void
+    public function saveSettings(array $settings)
     {
         $this->configuration->set(self::SETTINGS_KEY, json_encode($settings));
     }

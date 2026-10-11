@@ -1,7 +1,7 @@
 ---
 title: "Extend the Product Form with Custom Fields, Tabs, and CQRS"
 sidebarTitle: "Product Form"
-description: "Add custom fields and full tabs to the PrestaShop 9 product form using actionProductFormBuilderModifier and the ProductCommandsBuilderInterface CQRS approach."
+description: "Add custom fields and tabs to the PrestaShop 9 product form using actionProductFormBuilderModifier and the ProductCommandsBuilderInterface CQRS approach."
 ---
 
 The `demoproductform` module is a comprehensive reference implementation for extending the **Catalog → Products** edit form in PrestaShop 9. It demonstrates every major customisation point available: adding a field inside an existing tab, inserting entirely new tabs, adding a footer button, rendering content in the Modules tab, and extending the combination form. Data is saved through the `ProductCommandsBuilderInterface` CQRS mechanism — the recommended approach for the product page — rather than the generic `actionAfterUpdateProductFormHandler` hook, though the module also shows the hook approach for combinations.
@@ -34,7 +34,7 @@ The `demoproductform` module is a comprehensive reference implementation for ext
   <Step title="Install the module">
     Enable it from **Back Office → Module Manager**, or run:
     ```bash
-    php ./bin/console prestashop:module install demoproductform
+    php bin/console prestashop:module install demoproductform
     ```
   </Step>
 </Steps>

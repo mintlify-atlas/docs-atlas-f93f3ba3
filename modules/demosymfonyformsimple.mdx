@@ -1,7 +1,7 @@
 ---
 title: "Add a Module Configuration Page with a Symfony Form"
 sidebarTitle: "Simple Config Form"
-description: "Step-by-step guide to creating a single-form module configuration page using PrestaShop's AbstractConfigurationFormDataProvider and Symfony form types."
+description: "Step-by-step guide to creating a single-form module configuration page using PrestaShop's DataConfigurationInterface and Symfony form types."
 ---
 
 The `demosymfonyformsimple` module is deliberately the smallest possible Symfony-form configuration page. It has a single text field, a single configuration key, and the minimum number of classes required to wire them together. If you are building your first PrestaShop 9 module with a configuration page, this is the right place to start — read this module, understand every file, then graduate to `demosymfonyform` when you need richer inputs.
@@ -18,7 +18,7 @@ Requires **PrestaShop 9.0.0 or later** and Composer.
 
 Every Symfony-based configuration page in PrestaShop follows this layering:
 
-```
+```text
 DemoConfigurationFormType          ← Symfony form type (field definitions)
         ↕
 DemoConfigurationTextFormDataProvider  ← FormDataProviderInterface (glue)

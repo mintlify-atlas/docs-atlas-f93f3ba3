@@ -1,5 +1,5 @@
 ---
-title: "Display Extra Product Properties Across Multiple Front-Office Hooks"
+title: "Display Custom Extra Properties Across Front-Office Hooks"
 sidebarTitle: "Extra Properties"
 description: "Register a custom product property and surface it across cart, checkout, order detail, category, and CMS pages using multiple front-office display hooks."
 ---
@@ -153,6 +153,10 @@ The module registers the following hooks to display extra property values on the
 | `displayFooterProduct` | `product_footer.tpl` | Product page footer — updates `date_last_seen` |
 | `actionCartSave` | — (PHP only) | Seeds `delivery_note` on the cart |
 | `actionValidateOrder` | — (PHP only) | Copies cart `delivery_note` to the order |
+| `actionCmsPageFormBuilderModifier` | — (PHP only) | Adds CMS extra property fields to the Back Office CMS form |
+| `actionCmsPageFormDataProviderData` | — (PHP only) | Pre-fills CMS extra property fields when editing an existing CMS page |
+| `actionAfterCreateCmsPageFormHandler` | — (PHP only) | Persists CMS extra properties after a new CMS page is created |
+| `actionAfterUpdateCmsPageFormHandler` | — (PHP only) | Persists CMS extra properties after an existing CMS page is saved |
 
 ### Template: `product_additional_info.tpl`
 

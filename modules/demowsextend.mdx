@@ -1,7 +1,7 @@
 ---
-title: "Add a Custom ObjectModel Resource to the PrestaShop WebService"
+title: "Extend the PrestaShop WebService with a Custom Resource"
 sidebarTitle: "WebService Extension"
-description: "Expose a custom ObjectModel entity through PrestaShop's legacy XML/JSON WebService API by implementing the addWebserviceResources hook."
+description: "Expose a custom ObjectModel entity through PrestaShop's legacy XML/JSON WebService API by implementing the addWebserviceResources hook in a module."
 ---
 
 PrestaShop has shipped a built-in REST-like WebService since version 1.4. It speaks both XML and JSON, is secured by per-client API keys, and can automatically expose any `ObjectModel` subclass as a full CRUD resource. The `demowsextend` module shows the minimum code needed to register a custom entity — an `Article` — as a first-class WebService resource, giving external tools immediate access to `GET`, `POST`, `PUT`, and `DELETE` operations on `demo_articles`.

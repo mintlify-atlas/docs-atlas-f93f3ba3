@@ -1,5 +1,5 @@
 ---
-title: "Build a Custom Admin Data Grid with PrestaShop's Grid Component"
+title: "Build a Custom Admin Data Grid with the Grid Component"
 sidebarTitle: "Grid Component"
 description: "Implement a fully functional admin data grid using PrestaShop's Grid component: define columns, filters, bulk actions, and wire up a DBAL query builder."
 ---
@@ -14,7 +14,7 @@ Requires **PrestaShop 9.0.0 or later** and Composer.
 
 The Grid component is built from four collaborating pieces:
 
-```
+```text
 GridDefinitionFactory   ← defines columns, filters, bulk actions (structure)
         ↓
 ProductQueryBuilder     ← DBAL queries that fetch and count rows (data)
@@ -94,6 +94,16 @@ protected function getFilters()
                 'max_field_options' => ['attr' => ['placeholder' => $this->trans('Max', [], 'Admin.Global')]],
             ]))
                 ->setAssociatedColumn('price_tax_excluded')
+        )
+        ->add(
+            (new Filter('reference', TextType::class))
+                ->setTypeOptions(['required' => false, 'attr' => ['placeholder' => $this->trans('Reference', [], 'Modules.Demogrid.Admin')]])
+                ->setAssociatedColumn('reference')
+        )
+        ->add(
+            (new Filter('active', TextType::class))
+                ->setTypeOptions(['required' => false, 'attr' => ['placeholder' => $this->trans('Active', [], 'Modules.Demogrid.Admin')]])
+                ->setAssociatedColumn('active')
         )
         ->add(
             (new Filter('actions', SearchAndResetType::class))

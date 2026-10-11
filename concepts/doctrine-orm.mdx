@@ -9,16 +9,16 @@ PrestaShop has historically used its own `ObjectModel` base class for database p
 ## Why Doctrine ORM Over ObjectModel
 
 <CardGroup cols={2}>
-  <Card title="Type Safety" icon="shield-check">
+  <Card title="Type Safety" icon="shield-check" href="/modules/demodoctrine">
     Entity classes are plain PHP objects with typed properties. Doctrine maps them to columns using annotations or attributes rather than string-keyed arrays, so IDEs and static analyzers can catch field-name typos at development time.
   </Card>
-  <Card title="Repository Pattern" icon="database">
+  <Card title="Repository Pattern" icon="database" href="/modules/demodoctrine">
     Business query logic lives in dedicated `EntityRepository` subclasses rather than in controllers or hook methods. Repositories are injectable services, making them easy to test and reuse.
   </Card>
-  <Card title="No Core Table Modification" icon="lock">
+  <Card title="No Core Table Modification" icon="lock" href="/modules/demodoctrine">
     Your entities map to their own tables. You never alter PrestaShop's core schema, which makes your module forward-compatible with core upgrades.
   </Card>
-  <Card title="Associations" icon="link">
+  <Card title="Associations" icon="link" href="/modules/demodoctrine">
     `@ORM\OneToMany`, `@ORM\ManyToOne`, and other relation annotations let Doctrine handle JOINs and cascading operations declaratively, replacing hand-written SQL joins.
   </Card>
 </CardGroup>

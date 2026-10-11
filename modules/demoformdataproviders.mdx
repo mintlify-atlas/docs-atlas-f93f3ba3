@@ -1,7 +1,7 @@
 ---
 title: "Use Form Data Provider Hooks for Lightweight Field Extension"
 sidebarTitle: "Form Data Providers"
-description: "Inject custom default values and override form data using FormDataProviderData and FormDataProviderDefaultData hooks without Doctrine entities or ObjectModel."
+description: "Intercept and modify product form data using the FormDataProviderData and FormDataProviderDefaultData hooks — no new entities or database tables required."
 ---
 
 The `demoformdataproviders` module demonstrates the lightest-weight approach to modifying data loaded into a PrestaShop Back Office form: the **FormDataProvider hook pair**. Rather than restructuring the form builder or adding new fields, these hooks let you intercept the data array that a form's data provider has already assembled and modify specific values in place — before the form renders. No Doctrine entities, no ObjectModel subclass, and no new form type definitions are needed. The module uses the Product form as its example target, automatically prepending a `NEWMPNPREFIX_` prefix to the MPN (Manufacturer Part Number) field under **Details → References**.
@@ -24,7 +24,7 @@ The `demoformdataproviders` module demonstrates the lightest-weight approach to 
   <Step title="Install the module">
     No Composer dependencies are required. Enable it from **Back Office → Module Manager**, or run:
     ```bash
-    php ./bin/console prestashop:module install demoformdataproviders
+    php bin/console prestashop:module install demoformdataproviders
     ```
   </Step>
 </Steps>

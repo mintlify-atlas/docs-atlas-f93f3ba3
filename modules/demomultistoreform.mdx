@@ -1,7 +1,7 @@
 ---
 title: "Build Multistore-Compatible CRUD Forms in Your Module"
 sidebarTitle: "Multistore Forms"
-description: "Make module forms and CRUD listings fully multistore-compatible using shop association blocks, per-shop checkboxes, specific-settings dropdowns, and scoped listing filters."
+description: "Make module CRUD forms multistore-compatible with shop association blocks, per-shop checkboxes, specific-settings dropdowns, and scoped grid filters."
 ---
 
 The `demomultistoreform` module is the reference implementation for making a PrestaShop module's Back Office UI fully multistore-aware. It manages "content blocks" — simple entities with a title, description, and enable flag — and demonstrates every multistore feature a production module should implement: shop association on create/edit forms, a grid listing scoped to the current shop context, per-shop checkboxes on configuration forms, a specific-settings dropdown in "All Shops" context, and context-sensitive delete behaviour.
@@ -190,6 +190,7 @@ class ContentBlockType extends AbstractType
             ])
             ->add('description', TextType::class, [
                 'label' => 'Description',
+                'help' => 'Throws error if length is > 100 or text contains <>={}',
                 'constraints' => [
                     new TypedRegex(['type' => 'generic_name']),
                     new Length(['max' => 100]),

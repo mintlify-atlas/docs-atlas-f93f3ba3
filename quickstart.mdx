@@ -1,5 +1,5 @@
 ---
-title: "Get Started with PrestaShop Example Modules"
+title: "Get Started with PrestaShop Example Modules Quickly"
 sidebarTitle: "Quickstart"
 description: "Install a PrestaShop example module in four steps and understand the module file layout, install/uninstall lifecycle, and Symfony service wiring."
 ---
@@ -151,7 +151,7 @@ class DemoDoctrine extends Module
         $this->description = $this->l('Demonstration of Doctrine entities in PrestaShop');
     }
 
-    public function install(): bool
+    public function install()
     {
         // Create DB tables, call parent (registers the module), then subscribe to hook
         return $this->installTables()
@@ -159,13 +159,13 @@ class DemoDoctrine extends Module
             && $this->registerHook('displayHome');
     }
 
-    public function uninstall(): bool
+    public function uninstall()
     {
         // Drop custom tables, then call parent (deregisters the module)
         return $this->removeTables() && parent::uninstall();
     }
 
-    public function getContent(): void
+    public function getContent()
     {
         // Redirect the "Configure" button to the Symfony admin controller
         Tools::redirectAdmin(
@@ -173,7 +173,7 @@ class DemoDoctrine extends Module
         );
     }
 
-    public function hookDisplayHome(): string
+    public function hookDisplayHome()
     {
         // Fetch random quotes via the Doctrine repository (obtained from the container)
         $repository = $this->get(QuoteRepository::class);

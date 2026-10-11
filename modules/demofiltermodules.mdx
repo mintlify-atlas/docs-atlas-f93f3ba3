@@ -1,7 +1,7 @@
 ---
-title: "Filter Which Modules Execute for a Given Hook"
+title: "Selectively Filter Which Modules Execute on a Hook"
 sidebarTitle: "Filter Modules"
-description: "Use the filterHookModuleList hook to selectively exclude specific modules from executing for a hook, controlling which modules contribute to a page's output."
+description: "Use filterHookModuleExecList to exclude modules from a hook dispatch, controlling which modules contribute output on a per-page or per-context basis in PS."
 ---
 
 By default, every module that registers for a hook is executed whenever that hook fires — PrestaShop calls them all in priority order. In some scenarios you need finer control: disable a competing module's output on specific pages, implement A/B testing by routing different visitors to different module sets, or suppress a sidebar widget on the checkout funnel without fully unregistering the module.
@@ -122,6 +122,7 @@ imports:
     cd modules/demofiltermodules
     composer install
     ```
+    This generates the `vendor/autoload.php` required for PSR-4 class loading.
   </Step>
   <Step title="Install the module">
     From the Back Office **Module Manager**, or via CLI:

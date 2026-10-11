@@ -1,7 +1,7 @@
 ---
-title: "PrestaShop Module File Structure and Anatomy"
+title: "PrestaShop 9 Module Directory Structure and Anatomy"
 sidebarTitle: "Module Structure"
-description: "Understand the required files, directory layout, and naming conventions for a PrestaShop 9 module with Symfony services."
+description: "Learn the required files, directory layout, and naming conventions every PrestaShop 9 module must follow to integrate correctly with Symfony services."
 ---
 
 Every PrestaShop module is a self-contained PHP package that follows a strict set of naming and structural conventions. The PrestaShop autoloader and module manager both rely on these conventions to locate, instantiate, and lifecycle-manage your module. Understanding the layout before you write a single line of logic will save you from cryptic "module not found" errors and make your code immediately recognizable to other PrestaShop developers.
@@ -109,16 +109,16 @@ class democontrollertabs extends Module
 ```
 
 <CardGroup cols={2}>
-  <Card title="Constructor Properties" icon="wrench">
+  <Card title="Constructor Properties" icon="wrench" href="/modules/democontrollertabs">
     Set `name`, `author`, `version`, and `ps_versions_compliancy` **before** calling `parent::__construct()`. The parent constructor reads `$this->name` to load translations and configuration, so order matters.
   </Card>
-  <Card title="Display Properties" icon="eye">
+  <Card title="Display Properties" icon="eye" href="/modules/democontrollertabs">
     Set `displayName` and `description` **after** `parent::__construct()` because they use `$this->trans()`, which requires the translation context the parent sets up.
   </Card>
-  <Card title="install() / uninstall()" icon="download">
+  <Card title="install() / uninstall()" icon="download" href="/modules/democontrollertabs">
     Always chain `parent::install()` first. These methods create the database row in `ps_module`, register permissions, and handle hook registrations. A missing `parent::install()` call leaves your module in a broken half-installed state.
   </Card>
-  <Card title="getContent()" icon="gear">
+  <Card title="getContent()" icon="gear" href="/modules/democontrollertabs">
     Called when the admin clicks "Configure" in the module list. For Symfony-based modules it typically issues a redirect to the Symfony controller route rather than rendering HTML directly.
   </Card>
 </CardGroup>

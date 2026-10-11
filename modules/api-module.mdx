@@ -1,7 +1,7 @@
 ---
 title: "Extend PrestaShop's REST API with API Platform Resources"
 sidebarTitle: "API Platform"
-description: "Define custom API Platform resources and state handlers to add new REST endpoints to PrestaShop 9's new API, with full create, read, update, and delete support."
+description: "Define API Platform resources and state handlers to expose REST endpoints in PrestaShop 9's API, with full CRUD support via provider and processor classes."
 ---
 
 PrestaShop 9 ships a brand-new REST API built on top of [API Platform](https://api-platform.com/). Instead of writing routing files and controllers by hand, you annotate a plain PHP class with `#[ApiResource]` and point it at two handlers — a **provider** (reads data) and a **processor** (writes data). PrestaShop's Symfony kernel auto-discovers these services via the module's `services.yml` and immediately exposes full CRUD endpoints, an OpenAPI specification, and JSON-LD hypermedia support.

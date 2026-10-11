@@ -1,7 +1,7 @@
 ---
-title: "Add Custom Row Actions to an Existing Admin Grid"
+title: "Add Custom Row Actions to the PrestaShop Admin Grid"
 sidebarTitle: "Extend Grid"
-description: "Insert a new row action into the Orders admin grid using the actionOrdersGridDefinitionModifier hook and register JavaScript to handle the custom action."
+description: "Insert a new row action into the Orders admin grid using the actionOrderGridDefinitionModifier hook and register JavaScript to handle the custom action."
 ---
 
 The `demoextendgrid` module shows the canonical way to insert a new row action into any existing PrestaShop Back Office grid. It adds a **Mark** action to the Orders listing — a pinned inline button that fires an AJAX POST request when clicked. The same pattern applies to any grid that exposes an `actions` column: supply a hook implementation that receives the grid's `GridDefinitionInterface` and append a new `SubmitRowAction` to its row actions collection. A companion JavaScript file handles the AJAX call and provides visual feedback.
@@ -30,15 +30,15 @@ This module requires **PrestaShop 9.0.0 or later** and Composer to install its a
   </Step>
 </Steps>
 
-## The `actionOrdersGridDefinitionModifier` hook
+## The `actionOrderGridDefinitionModifier` hook
 
-Every PrestaShop Back Office grid fires a `action{GridId}GridDefinitionModifier` hook when its definition is built. For the Orders grid the hook name is `actionOrdersGridDefinitionModifier`. The hook passes the `GridDefinitionInterface` object in `$params['definition']`, giving you full access to columns, filters, and row actions.
+Every PrestaShop Back Office grid fires a `action{GridId}GridDefinitionModifier` hook when its definition is built. For the Orders grid the hook name is `actionOrderGridDefinitionModifier`. The hook passes the `GridDefinitionInterface` object in `$params['definition']`, giving you full access to columns, filters, and row actions.
 
 The module's hook implementation finds the existing `actions` column, retrieves its `RowActionCollectionInterface`, and appends a new `SubmitRowAction`:
 
 ```php
 // demoextendgrid.php
-public function hookActionOrdersGridDefinitionModifier(array $params): void
+public function hookActionOrderGridDefinitionModifier(array $params): void
 {
     /** @var GridDefinitionInterface $orderGridDefinition */
     $orderGridDefinition = $params['definition'];
@@ -206,5 +206,5 @@ private function registerHooks(Module $module): bool
 ```
 
 <Tip>
-The hook name in the installer uses `actionOrderGridDefinitionModifier` (without the trailing `s` on `Order`). In `demoextendgrid.php` the method is named `hookActionOrdersGridDefinitionModifier` (with an `s`). PrestaShop normalizes hook names at dispatch time, so both spellings resolve to the same hook. Always check the exact hook name in the PrestaShop source or devdocs to avoid confusion.
+The hook name follows the pattern `action{GridId}GridDefinitionModifier`, where `{GridId}` is the grid's identifier string. For the Orders grid, the identifier is `order` (not `orders`), making the hook name `actionOrderGridDefinitionModifier`. When implementing this hook for other grids, inspect the grid factory's `getId()` method to determine the correct identifier to use in the hook name.
 </Tip>

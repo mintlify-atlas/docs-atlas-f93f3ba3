@@ -1,5 +1,5 @@
 ---
-title: "Using Hooks to Extend PrestaShop Behavior"
+title: "Using Hooks to Extend PrestaShop 9 Module Behavior"
 sidebarTitle: "Hooks"
 description: "Learn how PrestaShop hooks work, how to register them in your module, and which hooks are most useful for admin and front-office customization."
 ---
@@ -9,10 +9,10 @@ Hooks are the primary extension mechanism in PrestaShop. At carefully chosen poi
 ## Two Categories of Hooks
 
 <CardGroup cols={2}>
-  <Card title="Display Hooks" icon="display">
+  <Card title="Display Hooks" icon="display" href="/modules/demovieworderhooks">
     Return an HTML string that PrestaShop injects into the page at the hook location. The method **must return a string**. Returning `null` or `void` results in nothing being rendered. Examples: `displayHome`, `displayAdminOrderSide`, `displayAdminOrderTabContent`.
   </Card>
-  <Card title="Action Hooks" icon="bolt">
+  <Card title="Action Hooks" icon="bolt" href="/modules/demovieworderhooks">
     Called to modify data, trigger side-effects, or intercept behavior. Parameters are passed by reference so you can mutate them in place. These hooks return nothing meaningful—PrestaShop ignores the return value. Examples: `actionGetAdminOrderButtons`, `actionProductFormBuilderModifier`, `actionCustomerGridDefinitionModifier`.
   </Card>
 </CardGroup>

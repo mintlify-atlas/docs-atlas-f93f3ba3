@@ -1,7 +1,7 @@
 ---
-title: "Alter Front-Office SEO Variables with actionFrontControllerSetVariables"
+title: "Override SEO Metadata and Structured Data via Hook"
 sidebarTitle: "SEO Variables"
-description: "Override page title, meta description, and Open Graph tags on any front-office page by modifying the Smarty variables via the actionFrontControllerSetVariables hook."
+description: "Override titles, meta descriptions, and structured data on front-office pages by modifying Smarty template variables via actionFrontControllerSetVariables."
 ---
 
 PrestaShop 9.2.0 introduced first-class **structured data** support in the core: product pages, category pages, and other front-office controllers now build a `structured_data` array that themes serialize into `<script type="application/ld+json">` blocks. The `actionFrontControllerSetVariables` hook fires after the front controller prepares all its Smarty variables, giving modules a chance to inspect and override them before the template renders.

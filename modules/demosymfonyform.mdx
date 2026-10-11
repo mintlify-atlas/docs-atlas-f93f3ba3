@@ -26,7 +26,7 @@ For a simple page with two or three fields that will never be extended, `HelperF
 
 The module follows a strict layered pattern for each form on each page:
 
-```
+```text
 FormType (Symfony form type definition)
     ↕
 FormDataProvider (reads/writes form data via DataConfiguration)
@@ -191,6 +191,35 @@ class DemoConfigurationChoiceType extends TranslatorAwareType
                         'children' => [
                             '3' => ['id_choice' => 3, 'name' => $this->trans('Choice 3', 'Modules.DemoSymfonyForm.Admin')],
                             '4' => ['id_choice' => 4, 'name' => $this->trans('Choice 4', 'Modules.DemoSymfonyForm.Admin')],
+                        ],
+                    ],
+                ],
+            ])
+            ->add('material_choice_multiple_choices_table', MaterialMultipleChoiceTableType::class, [
+                'label' => $this->trans('Material choice multiple choices table type', 'Modules.DemoSymfonyForm.Admin'),
+                'choices' => [
+                    $this->trans('Vertical choice 1', 'Modules.DemoSymfonyForm.Admin') => '1',
+                    $this->trans('Vertical choice 2', 'Modules.DemoSymfonyForm.Admin') => '2',
+                    $this->trans('Vertical choice 3', 'Modules.DemoSymfonyForm.Admin') => '3',
+                ],
+                'multiple_choices' => [
+                    [
+                        'name' => 'choice_1',
+                        'label' => $this->trans('Horizontal choice 1', 'Modules.DemoSymfonyForm.Admin'),
+                        'multiple' => true,
+                        'choices' => [
+                            $this->trans('Vertical choice 1', 'Modules.DemoSymfonyForm.Admin') => '1',
+                            $this->trans('Vertical choice 2', 'Modules.DemoSymfonyForm.Admin') => '2',
+                        ],
+                    ],
+                    [
+                        'name' => 'choice_2',
+                        'label' => $this->trans('Horizontal choice 2', 'Modules.DemoSymfonyForm.Admin'),
+                        'multiple' => true,
+                        'choices' => [
+                            $this->trans('Vertical choice 1', 'Modules.DemoSymfonyForm.Admin') => '1',
+                            $this->trans('Vertical choice 2', 'Modules.DemoSymfonyForm.Admin') => '2',
+                            $this->trans('Vertical choice 3', 'Modules.DemoSymfonyForm.Admin') => '3',
                         ],
                     ],
                 ],
