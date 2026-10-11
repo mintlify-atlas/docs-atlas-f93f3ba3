@@ -1,47 +1,259 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with PrestaShop Example Modules"
+sidebarTitle: "Quickstart"
+description: "Install a PrestaShop example module in four steps and understand the module file layout, install/uninstall lifecycle, and Symfony service wiring."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+The fastest way to understand how to build on PrestaShop 9 is to run one of the official example modules against a real installation and then read the source. This guide walks you through cloning the repository, installing `demodoctrine` — the most comprehensive example in the collection — and understanding the file layout and key source files that make it work.
 
 ## Prerequisites
 
-Before you begin, you must have:
+Before you begin, make sure you have the following available:
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
+- **PHP 8.1 or higher** with the extensions required by PrestaShop (PDO, intl, zip, curl, etc.)
+- **Composer** (v2 recommended) available on your `PATH`
+- **PrestaShop 9.0.0** installed locally or running in Docker, with the Back Office accessible
+- Write access to the `modules/` directory inside your PrestaShop installation
 
-## Get started
+## Installation
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Clone the example-modules repository into your modules directory">
+    Navigate to the root of your PrestaShop installation and clone the entire collection into the `modules/` directory. Each subdirectory is an independent module.
 
     ```bash
-    npm install your-package
+    cd /path/to/prestashop/modules
+    git clone https://github.com/PrestaShop/example-modules.git
     ```
+
+    This places all modules under `modules/example-modules/`. Because PrestaShop discovers modules by directory name, you will work directly inside the individual module folder rather than the parent clone directory.
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Choose a module — start with demodoctrine">
+    `demodoctrine` is the recommended first module to study because it touches the widest range of patterns: Doctrine ORM entities, a Symfony CRUD controller, Grid definition and data factory, identifiable object form builder and handler, and a hook that renders content on the front office.
 
     ```bash
-    your-cli init
+    cd example-modules/demodoctrine
     ```
+
+    <Tip>
+      If all you need is a simple Back Office configuration page with a form, start with `demosymfonyformsimple` instead. It is far smaller than `demodoctrine` and was built specifically to accompany the "Adding a configuration page" guide in the PrestaShop developer documentation.
+    </Tip>
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Install PHP dependencies with Composer">
+    `demodoctrine` uses PSR-4 autoloading for its `src/` tree. Run Composer inside the module directory to generate the `vendor/autoload.php` file that the module requires at runtime.
 
     ```bash
-    your-cli start
+    composer install --no-dev --optimize-autoloader
     ```
+
+    The module's `composer.json` declares `php: >=8.1` as its only runtime dependency — all PrestaShop framework classes are provided by the platform itself and do not need to be installed separately.
+  </Step>
+
+  <Step title="Install the module via the Symfony console">
+    From the **root of your PrestaShop installation** (not inside the module directory), run the PrestaShop module installer. This triggers the module's `install()` method, which creates the database tables and registers the `displayHome` hook.
+
+    ```bash
+    php bin/console prestashop:module install demodoctrine
+    ```
+
+    You should see confirmation output similar to:
+
+    ```
+    Module demodoctrine installed successfully.
+    ```
+
+    Then open your Back Office, navigate to **Modules → Module Manager**, and search for "Demo doctrine". The module should appear with a green **Enabled** status. Click **Configure** to open the Quotes admin page and confirm that the Doctrine-backed CRUD interface is working.
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Module Directory Layout
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+Once installed, `demodoctrine` has the following structure. This layout is representative of any well-organised module in the collection — all the patterns in the collection follow a similar shape.
+
+```text
+demodoctrine/
+├── composer.json               # PSR-4 autoload map, PHP version constraint
+├── config.xml                  # Module metadata cache (auto-generated)
+├── demodoctrine.php            # Main module class — constructor, install, uninstall
+├── logo.png                    # Module thumbnail shown in the Back Office
+├── config/
+│   ├── common.yml              # Core infrastructure services (repository, installer)
+│   ├── services.yml            # Full service container: controller, forms, grid
+│   ├── routes.yml              # Symfony route definitions for admin controllers
+│   └── front/                  # Front-office context service overrides
+├── src/
+│   ├── Controller/
+│   │   └── Admin/
+│   │       └── QuotesController.php   # Symfony FrameworkBundleAdminController
+│   ├── Database/
+│   │   ├── QuoteInstaller.php         # CREATE / DROP TABLE helpers
+│   │   └── QuoteGenerator.php         # Demo data seeder
+│   ├── Entity/
+│   │   └── Quote.php                  # Doctrine ORM entity with @ORM annotations
+│   ├── Form/
+│   │   ├── QuoteType.php              # Symfony form type
+│   │   ├── QuoteFormDataProvider.php  # Loads entity data into the form
+│   │   └── QuoteFormDataHandler.php   # Persists form data back to the entity
+│   ├── Grid/
+│   │   ├── Definition/Factory/
+│   │   │   └── QuoteGridDefinitionFactory.php
+│   │   └── Query/
+│   │       └── QuoteQueryBuilder.php
+│   └── Repository/
+│       └── QuoteRepository.php        # Doctrine EntityRepository
+└── views/
+    ├── css/
+    ├── js/
+    └── templates/
+        ├── admin/                     # Twig templates for the Back Office
+        └── front/                     # Smarty templates for the front office
+            └── home.tpl
+```
+
+## Main Module File
+
+Every PrestaShop module starts with a PHP file that shares the module's directory name. This file defines the module class, sets its metadata, and implements the install and uninstall lifecycle. Below is the complete `demodoctrine.php`, lightly annotated.
+
+```php
+<?php
+declare(strict_types=1);
+
+use Module\DemoDoctrine\Database\QuoteInstaller;
+use Module\DemoDoctrine\Repository\QuoteRepository;
+
+// Guard against direct file access
+if (!defined('_PS_VERSION_')) {
+    exit;
+}
+
+// Load Composer's autoloader so PSR-4 classes in src/ are available
+if (file_exists(__DIR__ . '/vendor/autoload.php')) {
+    require_once __DIR__ . '/vendor/autoload.php';
+}
+
+class DemoDoctrine extends Module
+{
+    public function __construct()
+    {
+        $this->name    = 'demodoctrine';          // Must match directory name
+        $this->author  = 'PrestaShop';
+        $this->version = '2.0.0';
+        $this->ps_versions_compliancy = [
+            'min' => '9.0.0',
+            'max' => '9.99.99',
+        ];
+
+        parent::__construct();                    // Initialises $this->context etc.
+
+        $this->displayName = $this->l('Demo doctrine');
+        $this->description = $this->l('Demonstration of Doctrine entities in PrestaShop');
+    }
+
+    public function install(): bool
+    {
+        // Create DB tables, call parent (registers the module), then subscribe to hook
+        return $this->installTables()
+            && parent::install()
+            && $this->registerHook('displayHome');
+    }
+
+    public function uninstall(): bool
+    {
+        // Drop custom tables, then call parent (deregisters the module)
+        return $this->removeTables() && parent::uninstall();
+    }
+
+    public function getContent(): void
+    {
+        // Redirect the "Configure" button to the Symfony admin controller
+        Tools::redirectAdmin(
+            $this->context->link->getAdminLink('AdminDemodoctrineQuote')
+        );
+    }
+
+    public function hookDisplayHome(): string
+    {
+        // Fetch random quotes via the Doctrine repository (obtained from the container)
+        $repository = $this->get(QuoteRepository::class);
+        $langId     = $this->context->language->id;
+        $quotes     = $repository->getRandom($langId, 3);
+
+        $this->smarty->assign(['quotes' => $quotes]);
+
+        return $this->fetch('module:demodoctrine/views/templates/front/home.tpl');
+    }
+
+    // ... private installTables() / removeTables() / getInstaller() helpers
+}
+```
+
+The three public methods — constructor, `install()`, and `uninstall()` — are the minimum required surface of any PrestaShop module. Everything else (`getContent()`, hook methods) is optional and additive.
+
+## Symfony Service Wiring
+
+PrestaShop 9 loads a module's Symfony services from `config/services.yml` automatically when the module is installed and the container is built. `demodoctrine` splits its service definitions across two files:
+
+**`config/common.yml`** — declares the low-level infrastructure services that are needed during installation (before the full container is available):
+
+```yaml
+services:
+    Module\DemoDoctrine\Repository\QuoteRepository:
+        public: true
+        factory: ['@doctrine.orm.default_entity_manager', getRepository]
+        arguments:
+            - Module\DemoDoctrine\Entity\Quote
+
+    Module\DemoDoctrine\Database\QuoteInstaller:
+        public: true
+        arguments:
+            - '@doctrine.dbal.default_connection'
+            - '%database_prefix%'
+```
+
+**`config/services.yml`** — imports `common.yml` and then declares the full application layer: the admin controller, form builder and handler, and Grid factory:
+
+```yaml
+imports:
+    - { resource: ./common.yml }
+
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    Module\DemoDoctrine\Controller\Admin\QuotesController: ~
+
+    # Identifiable object form builder wired to QuoteType + QuoteFormDataProvider
+    prestashop.module.demodoctrine.form.identifiable_object.builder.quote_form_builder:
+        class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilder'
+        factory: ['@prestashop.core.form.builder.form_builder_factory', 'create']
+        arguments:
+            - 'Module\DemoDoctrine\Form\QuoteType'
+            - '@Module\DemoDoctrine\Form\QuoteFormDataProvider'
+
+    # Grid factory wired to the quote grid definition and Doctrine query builder
+    prestashop.module.demodoctrine.grid.factory.quotes:
+        class: 'PrestaShop\PrestaShop\Core\Grid\GridFactory'
+        arguments:
+            - '@prestashop.module.demodoctrine.grid.definition.factory.quotes'
+            - '@prestashop.module.demodoctrine.grid.data_provider.quotes'
+            - '@prestashop.core.grid.filter.form_factory'
+            - '@prestashop.core.hook.dispatcher'
+```
+
+The `_defaults` block (`autowire: true`, `autoconfigure: true`) means that any class registered without explicit arguments will have its constructor dependencies resolved automatically from the container — the same Symfony convention you will find throughout the PrestaShop core.
+
+## Next Steps
+
+You have a working module installed and you understand the three key files: the main PHP class, `config/common.yml`, and `config/services.yml`. From here, explore the patterns you need most:
+
+<CardGroup cols={2}>
+  <Card title="Module Structure" icon="folder-tree" href="/concepts/module-structure">
+    A deeper look at how PrestaShop discovers and loads modules, the role of each configuration file, and how autoloading works.
+  </Card>
+  <Card title="Hooks" icon="link" href="/concepts/hooks">
+    Learn how to subscribe to and implement hooks — the primary mechanism for modules to react to and extend PrestaShop's behaviour.
+  </Card>
+</CardGroup>

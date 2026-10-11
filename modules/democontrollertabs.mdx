@@ -1,0 +1,256 @@
+---
+title: "Create Admin Controllers and Register Navigation Tabs"
+sidebarTitle: "Controller Tabs"
+description: "Learn how to create Symfony-based admin controllers in a PrestaShop module, register them with automatic and manual tab navigation entries."
+---
+
+The `democontrollertabs` module is the canonical reference for building Symfony admin controllers inside a PrestaShop 9 module. It demonstrates four distinct controller patterns — from a bare-minimum controller with no security to a fully secured one with `#[AdminSecurity]` attributes — and shows both automatic tab registration (via the `$this->tabs` array in the module constructor) and manual tab registration (by instantiating a `Tab` object in `install()`). If you need an admin page in your module and want to understand how routing, tab registration, and access control all connect, start here.
+
+<Note>
+This module requires **PrestaShop 9.0.0 or later**. It also requires Composer to install its autoloader before the module can be installed.
+</Note>
+
+## What the module demonstrates
+
+The module registers four Symfony controllers, each showcasing a different design decision:
+
+| Controller | Security | Tab entry |
+|---|---|---|
+| `ConfigureController` | `#[AdminSecurity]` on `read` | Automatic (via `$this->tabs`) |
+| `MinimalistController` | None | None (silent, not visible in nav) |
+| `SecuredController` | `#[AdminSecurity]` on `read` | None (silent, not visible in nav) |
+| `ManualTabController` | `#[AdminSecurity]` on explicit class name | Manual (created in `install()`) |
+
+## Automatic tab registration with `$this->tabs`
+
+The most convenient way to add a Back Office navigation tab is to declare it in the `$this->tabs` array inside the module constructor. PrestaShop reads this array during install and creates (or updates) `Tab` objects automatically.
+
+```php
+// democontrollertabs.php
+$this->tabs = [
+    [
+        'route_name' => 'ps_controller_tabs_configure',
+        'class_name' => ConfigureController::TAB_CLASS_NAME,
+        'visible' => true,
+        'name' => $tabNames,
+        'icon' => 'school',
+        'parent_class_name' => 'IMPROVE',
+    ],
+];
+```
+
+Each entry is a plain associative array. The important keys are:
+
+- **`route_name`** — the Symfony route name that the tab links to (must match a route defined in `config/routes.yml`).
+- **`class_name`** — a unique string that identifies the legacy controller class name. This is also used by the `#[AdminSecurity]` attribute to look up permissions.
+- **`parent_class_name`** — where to nest the tab. `IMPROVE` and `CONFIGURE` are the two top-level Back Office menu sections.
+- **`visible`** — set to `false` to create a hidden tab (the controller is still routable, but no link appears in the sidebar).
+
+The `$tabNames` array is built by iterating over active languages, which ensures the tab label is translatable:
+
+```php
+$tabNames = [];
+foreach (Language::getLanguages(true) as $lang) {
+    $tabNames[$lang['locale']] = $this->trans(
+        'Demo Controller Tabs',
+        [],
+        'Modules.Democontrollertabs.Admin',
+        $lang['locale']
+    );
+}
+```
+
+## Manual tab registration in `install()`
+
+When you need more control — for example to attach a tab to a controller that you discover at install time rather than at module load time — use the `Tab` object directly. The module shows this pattern for `ManualTabController`:
+
+```php
+// democontrollertabs.php
+private function manuallyInstallTab(): bool
+{
+    $controllerClassName = ManualTabController::TAB_CLASS_NAME;
+    $tabId = (int) Tab::getIdFromClassName($controllerClassName);
+    if (!$tabId) {
+        $tabId = null;
+    }
+
+    $tab = new Tab($tabId);
+    $tab->active = 1;
+    $tab->class_name = $controllerClassName;
+    $tab->route_name = 'ps_controller_tabs_manual_tab';
+    $tab->name = [];
+    foreach (Language::getLanguages() as $lang) {
+        $tab->name[$lang['id_lang']] = $this->trans(
+            'Manual Tab controller',
+            [],
+            'Modules.Democontrollertabs.Admin',
+            $lang['locale']
+        );
+    }
+    $tab->icon = 'build';
+    $tab->id_parent = (int) Tab::getIdFromClassName('IMPROVE');
+    $tab->module = $this->name;
+
+    return (bool) $tab->save();
+}
+
+public function install()
+{
+    return parent::install() && $this->manuallyInstallTab();
+}
+```
+
+<Tip>
+Checking `Tab::getIdFromClassName()` before constructing the `Tab` object means re-running install (e.g. during development) will update the existing tab rather than creating a duplicate.
+</Tip>
+
+## Defining routes
+
+Every Symfony controller in a module must have a route entry in `config/routes.yml`. The `_legacy_controller` and `_legacy_link` defaults are what connect a Symfony route back to the legacy tab system — they let `$this->context->link->getAdminLink('AdminDemoControllerTabsConfigure')` resolve to the correct Symfony URL.
+
+```yaml
+# config/routes.yml
+ps_controller_tabs_configure:
+    path: /configure-tabs
+    methods: [GET]
+    defaults:
+        _controller: 'PrestaShop\Module\DemoControllerTabs\Controller\Admin\ConfigureController::indexAction'
+        _legacy_controller: 'AdminDemoControllerTabsConfigure'
+        _legacy_link: 'AdminDemoControllerTabsConfigure'
+
+ps_controller_tabs_minimalist:
+    path: /configure-tabs/minimalist
+    methods: [GET]
+    defaults:
+        _controller: 'PrestaShop\Module\DemoControllerTabs\Controller\Admin\MinimalistController::indexAction'
+
+ps_controller_tabs_secured:
+    path: /configure-tabs/secured
+    methods: [GET]
+    defaults:
+        _controller: 'PrestaShop\Module\DemoControllerTabs\Controller\Admin\SecuredController::indexAction'
+        _legacy_controller: 'AdminDemoControllerTabsSecured'
+
+ps_controller_tabs_manual_tab:
+    path: /configure-tabs/manual_tab
+    methods: [GET]
+    defaults:
+        _controller: 'PrestaShop\Module\DemoControllerTabs\Controller\Admin\ManualTabController::indexAction'
+```
+
+Notice that `ps_controller_tabs_minimalist` has no `_legacy_controller` — that controller has no tab and no legacy link, so none is needed.
+
+## Security with `#[AdminSecurity]`
+
+PrestaShop's `#[AdminSecurity]` PHP 8 attribute gates access to a controller action. The attribute accepts a Symfony Security expression. The standard pattern uses the `_legacy_controller` request attribute as the resource to check against:
+
+```php
+// ConfigureController.php
+use PrestaShopBundle\Controller\Admin\PrestaShopAdminController;
+use PrestaShopBundle\Security\Attribute\AdminSecurity;
+use Symfony\Component\HttpFoundation\Response;
+
+class ConfigureController extends PrestaShopAdminController
+{
+    public const TAB_CLASS_NAME = 'AdminDemoControllerTabsConfigure';
+
+    #[AdminSecurity("is_granted('read', request.get('_legacy_controller'))")]
+    public function indexAction(): Response
+    {
+        return $this->render('@Modules/democontrollertabs/views/templates/admin/configure.html.twig');
+    }
+}
+```
+
+`ManualTabController` uses a hardcoded class name string instead of `request.get('_legacy_controller')`, which is necessary when the route has no `_legacy_controller` default but the controller still needs access control:
+
+```php
+// ManualTabController.php
+class ManualTabController extends PrestaShopAdminController
+{
+    public const TAB_CLASS_NAME = 'AdminDemoControllerTabsManualTab';
+
+    #[AdminSecurity("is_granted('read', 'AdminDemoControllerTabsManualTab')")]
+    public function indexAction(): Response
+    {
+        return $this->render('@Modules/democontrollertabs/views/templates/admin/manual_tab.html.twig');
+    }
+}
+```
+
+`MinimalistController` omits the attribute entirely — it has no security check and is accessible to any authenticated Back Office user:
+
+```php
+// MinimalistController.php
+class MinimalistController extends PrestaShopAdminController
+{
+    public function indexAction(): Response
+    {
+        return $this->render('@Modules/democontrollertabs/views/templates/admin/minimalist.html.twig');
+    }
+}
+```
+
+<Warning>
+Omitting `#[AdminSecurity]` means **any** authenticated admin user can access the controller, regardless of their role. Only do this intentionally, as `MinimalistController` does here to demonstrate the contrast.
+</Warning>
+
+## Service registration
+
+All four controllers are registered as Symfony services with `autowire: true` and `autoconfigure: true`. Autoconfiguration is what makes PrestaShop recognize them as controllers (by detecting the `PrestaShopAdminController` parent class).
+
+```yaml
+# config/services.yml
+services:
+  PrestaShop\Module\DemoControllerTabs\Controller\Admin\ConfigureController:
+    autowire: true
+    autoconfigure: true
+
+  PrestaShop\Module\DemoControllerTabs\Controller\Admin\ManualTabController:
+    autowire: true
+    autoconfigure: true
+
+  PrestaShop\Module\DemoControllerTabs\Controller\Admin\MinimalistController:
+    autowire: true
+    autoconfigure: true
+
+  PrestaShop\Module\DemoControllerTabs\Controller\Admin\SecuredController:
+    autowire: true
+    autoconfigure: true
+```
+
+## Redirecting from `getContent()`
+
+Clicking "Configure" in Module Manager calls `getContent()`. The module redirects to the Symfony route using the legacy link helper, which transparently resolves to the correct Symfony URL:
+
+```php
+public function getContent()
+{
+    Tools::redirectAdmin(
+        $this->context->link->getAdminLink(ConfigureController::TAB_CLASS_NAME)
+    );
+}
+```
+
+## Installation
+
+<Steps>
+  <Step title="Clone or download the module">
+    Place the module in your PrestaShop `modules/` directory and ensure the folder is named `democontrollertabs`.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/democontrollertabs
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    Install via the Back Office Module Manager, or run:
+    ```bash
+    php bin/console prestashop:module install democontrollertabs
+    ```
+  </Step>
+  <Step title="Open the module configuration page">
+    Click **Configure** next to the module in Module Manager. You will be redirected to the `ConfigureController` page, which links out to the other example controllers and explains each one.
+  </Step>
+</Steps>

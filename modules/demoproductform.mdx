@@ -1,0 +1,464 @@
+---
+title: "Extend the Product Form with Custom Fields, Tabs, and CQRS"
+sidebarTitle: "Product Form"
+description: "Add custom fields and full tabs to the PrestaShop 9 product form using actionProductFormBuilderModifier and the ProductCommandsBuilderInterface CQRS approach."
+---
+
+The `demoproductform` module is a comprehensive reference implementation for extending the **Catalog → Products** edit form in PrestaShop 9. It demonstrates every major customisation point available: adding a field inside an existing tab, inserting entirely new tabs, adding a footer button, rendering content in the Modules tab, and extending the combination form. Data is saved through the `ProductCommandsBuilderInterface` CQRS mechanism — the recommended approach for the product page — rather than the generic `actionAfterUpdateProductFormHandler` hook, though the module also shows the hook approach for combinations.
+
+## What the module adds
+
+**Product form**
+- **Description tab** — a `demo_module_custom_field` text input inserted after the built-in description field.
+- **Customization tab** (new, inserted after Pricing) — a `custom_price` money field using `CustomTabType`.
+- **Custom tab content tab** (new, inserted after Customization) — a second tab using `CustomTabContentType`.
+- **Footer** — an "Open supplier website" link button added to the product form footer.
+- **Modules tab** — a Twig template rendered via `displayAdminProductsExtra` showing the stored custom product data.
+
+**Combination form** (for products with combinations)
+- A `demo_module_custom_field` text input after the References section.
+- A **Customization** tab with a `custom_price` money field after the Price impact section.
+
+## Installation
+
+<Steps>
+  <Step title="Place the module">
+    Clone or download the module into the `modules/` directory of your PrestaShop installation. Ensure the directory is named `demoproductform`.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/demoproductform
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    Enable it from **Back Office → Module Manager**, or run:
+    ```bash
+    php ./bin/console prestashop:module install demoproductform
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  PrestaShop 9.0.0 or later is required. The `Installer` class creates two database tables — `demoproductform_custom_product` and `demoproductform_custom_product_attribute` — on install.
+</Note>
+
+## Hook registration
+
+The main module file registers hooks and delegates to modifier/handler services:
+
+```php
+// hookActionProductFormBuilderModifier
+public function hookActionProductFormBuilderModifier(array $params): void
+{
+    /** @var ProductFormModifier $productFormModifier */
+    $productFormModifier = $this->get(ProductFormModifier::class);
+    $productId = isset($params['id']) ? new ProductId((int) $params['id']) : null;
+
+    $productFormModifier->modify($productId, $params['form_builder']);
+}
+
+// hookActionCombinationFormFormBuilderModifier
+public function hookActionCombinationFormFormBuilderModifier(array $params): void
+{
+    /** @var CombinationFormModifier $productFormModifier */
+    $productFormModifier = $this->get(CombinationFormModifier::class);
+    $combinationId = isset($params['id']) ? new CombinationId((int) $params['id']) : null;
+
+    $productFormModifier->modify($combinationId, $params['form_builder']);
+}
+```
+
+Notice how the hook methods stay thin — they resolve IDs from the params array and hand off to dedicated modifier services. This keeps the main module file clean and the modifier classes independently testable.
+
+## ProductFormModifier
+
+`ProductFormModifier` is the central service for all product form changes. It uses `FormBuilderModifier` — a PrestaShop helper for inserting fields at specific positions — to add content to multiple parts of the form:
+
+```php
+final class ProductFormModifier
+{
+    public function __construct(
+        private readonly TranslatorInterface $translator,
+        private readonly FormBuilderModifier $formBuilderModifier
+    ) {
+    }
+
+    public function modify(
+        ?ProductId $productId,
+        FormBuilderInterface $productFormBuilder
+    ): void {
+        $idValue = $productId ? $productId->getValue() : null;
+        $customProduct = new CustomProduct($idValue);
+        $this->modifyDescriptionTab($customProduct, $productFormBuilder);
+        $this->addCustomTab($customProduct, $productFormBuilder);
+        $this->modifyFooter($productFormBuilder);
+    }
+```
+
+### Adding a field to the Description tab
+
+```php
+private function modifyDescriptionTab(CustomProduct $customProduct, FormBuilderInterface $productFormBuilder): void
+{
+    $descriptionTabFormBuilder = $productFormBuilder->get('description');
+    $this->formBuilderModifier->addAfter(
+        $descriptionTabFormBuilder,
+        'description',
+        'demo_module_custom_field',
+        TextType::class,
+        [
+            'label' => $this->translator->trans('Demo custom field', [], 'Modules.Demoproductform.Admin'),
+            'label_attr' => [
+                'title' => 'h2',
+                'class' => 'text-info',
+            ],
+            'attr' => [
+                'placeholder' => $this->translator->trans('Your example text here', [], 'Modules.Demoproductform.Admin'),
+            ],
+            'data' => $customProduct->custom_field,
+            'empty_data' => '',
+            'form_theme' => '@PrestaShop/Admin/TwigTemplateForm/prestashop_ui_kit_base.html.twig',
+        ]
+    );
+}
+```
+
+`addAfter()` takes the form builder of the target tab, the existing field name to insert after, the new field name, its type, and options. The `form_theme` option applies PrestaShop's UI kit styling to the field.
+
+### Adding custom tabs
+
+Two new tabs are inserted after the core Pricing tab:
+
+```php
+private function addCustomTab(CustomProduct $customProduct, FormBuilderInterface $productFormBuilder): void
+{
+    $this->formBuilderModifier->addAfter(
+        $productFormBuilder,
+        'pricing',
+        'custom_tab',
+        CustomTabType::class,
+        [
+            'data' => [
+                'custom_price' => $customProduct->custom_price,
+            ],
+        ]
+    );
+    $this->formBuilderModifier->addAfter(
+        $productFormBuilder,
+        'custom_tab',
+        'custom_tab_content',
+        CustomTabContentType::class,
+        [
+            'data' => [
+                'custom_price' => $customProduct->custom_price,
+            ],
+        ],
+    );
+}
+```
+
+When a top-level form builder entry has a tab-compatible type, PrestaShop's product form renderer automatically creates a navigation tab for it.
+
+### Adding a footer button
+
+```php
+private function modifyFooter(FormBuilderInterface $productFormBuilder): void
+{
+    $headerFormBuilder = $productFormBuilder->get('footer');
+    $headerFormBuilder->add('forms_info', IconButtonType::class, [
+        'label' => $this->translator->trans('Open supplier website'),
+        'type' => 'link',
+        'attr' => [
+            'href' => 'http://www.prestashop.com',
+            'target' => '_blank',
+        ],
+    ]);
+}
+```
+
+## CustomTabType
+
+The `CustomTabType` form type defines the Customization tab with a validated money field:
+
+```php
+class CustomTabType extends TranslatorAwareType
+{
+    public function buildForm(FormBuilderInterface $builder, array $options)
+    {
+        parent::buildForm($builder, $options);
+        $builder
+            ->add('custom_price', MoneyType::class, [
+                'label' => $this->trans('My custom price', 'Modules.Demoproductform.Admin'),
+                'label_tag_name' => 'h3',
+                'currency' => $this->defaultCurrency->iso_code,
+                'required' => false,
+                'constraints' => [
+                    new NotBlank(),
+                    new Type(['type' => 'float']),
+                    new PositiveOrZero(),
+                ],
+            ]);
+    }
+
+    public function configureOptions(OptionsResolver $resolver)
+    {
+        parent::configureOptions($resolver);
+        $resolver->setDefaults([
+            'label' => $this->trans('Customization', 'Modules.Demoproductform.Admin'),
+        ]);
+    }
+}
+```
+
+The `label` option set in `configureOptions()` is used as the tab label in the product form navigation.
+
+## CombinationFormModifier
+
+The combination form modifier follows the same `addAfter` pattern applied to the combination form builder:
+
+```php
+public function modify(
+    ?CombinationId $combinationId,
+    FormBuilderInterface $combinationFormBuilder
+): void {
+    $idValue = $combinationId ? $combinationId->getValue() : null;
+    $customCombination = new CustomCombination($idValue);
+    $this->addCustomField($customCombination, $combinationFormBuilder);
+    $this->addCustomTab($customCombination, $combinationFormBuilder);
+}
+```
+
+Combination data is saved via `hookActionAfterUpdateCombinationFormFormHandler` directly in the main module file, using the ObjectModel approach rather than a command builder:
+
+```php
+public function hookActionAfterUpdateCombinationFormFormHandler(array $params): void
+{
+    $combinationId = $params['form_data']['id'];
+    $customCombination = new CustomCombination($combinationId);
+    $customCombination->custom_field = $params['form_data']['demo_module_custom_field'] ?? '';
+    $customCombination->custom_price = $params['form_data']['custom_tab']['custom_price'] ?? 0.0;
+
+    if (empty($customCombination->id)) {
+        $customCombination->id = $combinationId;
+        $customCombination->force_id = true;
+        $customCombination->add();
+    } else {
+        $customCombination->update();
+    }
+}
+```
+
+## ProductCommandsBuilderInterface — the CQRS save path
+
+For product form saves, the module implements `ProductCommandsBuilderInterface` instead of using `actionAfterUpdateProductFormHandler`. This is the recommended approach: the core `ProductCommandsBuilder` collects all registered builder services, calls `buildCommands()` on each, and dispatches the returned commands in bulk.
+
+### UpdateCustomProductCommand
+
+The command carries the product ID and optional custom field values, using setter methods that return `$this` for fluent chaining:
+
+```php
+final class UpdateCustomProductCommand
+{
+    private ProductId $productId;
+    private string $customerField = '';
+    private ?DecimalNumber $customPrice = null;
+
+    public function __construct(int $productId)
+    {
+        $this->productId = new ProductId($productId);
+    }
+
+    public function setCustomerField(string $customerField): self
+    {
+        $this->customerField = $customerField;
+        return $this;
+    }
+
+    public function setCustomPrice(string $customPrice): self
+    {
+        $this->customPrice = new DecimalNumber($customPrice);
+        return $this;
+    }
+    // getters ...
+}
+```
+
+### CustomProductCommandsBuilder
+
+The builder inspects `$formData` and only creates the command when relevant fields are present, returning an empty array if nothing needs saving:
+
+```php
+final class CustomProductCommandsBuilder implements ProductCommandsBuilderInterface
+{
+    public function buildCommands(ProductId $productId, array $formData, ShopConstraint $singleShopConstraint): array
+    {
+        $command = null;
+        if (isset($formData['description']['demo_module_custom_field'])) {
+            $command = $this->getCommand($command, $productId->getValue())
+                ->setCustomerField($formData['description']['demo_module_custom_field']);
+        }
+        if (isset($formData['custom_tab']['custom_price'])) {
+            $command = $this->getCommand($command, $productId->getValue())
+                ->setCustomPrice((string) $formData['custom_tab']['custom_price']);
+        }
+
+        return null !== $command ? [$command] : [];
+    }
+
+    private function getCommand(?UpdateCustomProductCommand $existingCommand, int $productId): UpdateCustomProductCommand
+    {
+        if (null !== $existingCommand) {
+            return $existingCommand;
+        }
+        return new UpdateCustomProductCommand($productId);
+    }
+}
+```
+
+### UpdateCustomProductCommandHandler
+
+The handler saves to the `CustomProduct` ObjectModel, selectively updating only the fields that were provided:
+
+```php
+#[AsCommandHandler]
+final class UpdateCustomProductCommandHandler
+{
+    public function handle(UpdateCustomProductCommand $command): void
+    {
+        $productId = $command->getProductId()->getValue();
+        $customProduct = new CustomProduct($productId);
+
+        $updatedFields = [];
+        if (null !== $command->getCustomerField()) {
+            $customProduct->custom_field = $command->getCustomerField();
+            $updatedFields['custom_field'] = true;
+        }
+
+        if (null !== $command->getCustomPrice()) {
+            $customProduct->custom_price = (float) (string) $command->getCustomPrice();
+            $updatedFields['custom_price'] = true;
+        }
+
+        if (empty($customProduct->id)) {
+            $customProduct->id = $productId;
+            $customProduct->force_id = true;
+            $customProduct->add();
+        } else {
+            $customProduct->setFieldsToUpdate($updatedFields);
+            $customProduct->update();
+        }
+    }
+}
+```
+
+`setFieldsToUpdate()` tells ObjectModel to only write the specified columns, preventing accidental overwrites of other fields.
+
+## Entity definitions
+
+### CustomProduct
+
+```php
+final class CustomProduct extends \ObjectModel
+{
+    public $id;
+    public string $custom_field = '';
+    public float $custom_price = 0.0;
+    public string $date_add;
+    public string $date_upd;
+    public $force_id = true;
+
+    public static $definition = [
+        'table' => 'demoproductform_custom_product',
+        'primary' => 'id',
+        'fields' => [
+            'custom_field' => ['type' => self::TYPE_STRING],
+            'custom_price' => ['type' => self::TYPE_FLOAT, 'validate' => 'isPrice'],
+            'date_add'     => ['type' => self::TYPE_DATE, 'validate' => 'isDate'],
+            'date_upd'     => ['type' => self::TYPE_DATE, 'validate' => 'isDate'],
+        ],
+    ];
+}
+```
+
+### CustomCombination
+
+`CustomCombination` uses the same structure, mapping to `demoproductform_custom_product_attribute` with `id` matching the combination ID:
+
+```php
+final class CustomCombination extends \ObjectModel
+{
+    public $id;
+    public string $custom_field = '';
+    public float $custom_price = 0.0;
+
+    public static $definition = [
+        'table' => 'demoproductform_custom_product_attribute',
+        'primary' => 'id',
+        // ...
+    ];
+}
+```
+
+Both entities set `$force_id = true` so that the row ID always matches the product/combination ID — no auto-increment is used.
+
+## services.yml — tagging the command builder
+
+The `core.product_command_builder` tag is what causes the core product save flow to discover and call `CustomProductCommandsBuilder`:
+
+```yaml
+services:
+  PrestaShop\Module\DemoProductForm\Form\Modifier\ProductFormModifier:
+    autowire: true
+    public: true
+    arguments:
+      $formBuilderModifier: '@form.form_builder_modifier'
+
+  PrestaShop\Module\DemoProductForm\Form\Modifier\CombinationFormModifier:
+    autowire: true
+    public: true
+    arguments:
+      $formBuilderModifier: '@form.form_builder_modifier'
+
+  PrestaShop\Module\DemoProductForm\CQRS\CommandHandler\UpdateCustomProductCommandHandler:
+    class: PrestaShop\Module\DemoProductForm\CQRS\CommandHandler\UpdateCustomProductCommandHandler
+    autoconfigure: true
+
+  PrestaShop\Module\DemoProductForm\CQRS\CommandBuilder\CustomProductCommandsBuilder:
+    class: PrestaShop\Module\DemoProductForm\CQRS\CommandBuilder\CustomProductCommandsBuilder
+    tags: ['core.product_command_builder']
+
+  PrestaShop\Module\DemoProductForm\Form\Type\CustomTabType:
+    class: PrestaShop\Module\DemoProductForm\Form\Type\CustomTabType
+    parent: 'form.type.translatable.aware'
+    public: true
+    arguments:
+      - '@=service("prestashop.adapter.data_provider.currency").getDefaultCurrency()'
+    tags:
+      - { name: form.type }
+```
+
+<Warning>
+  Without the `core.product_command_builder` tag on `CustomProductCommandsBuilder`, the core product save flow will never call `buildCommands()` and your custom fields will not be persisted. This tag is specific to the product form — other forms use `actionAfterUpdate{FormName}FormHandler` hooks instead.
+</Warning>
+
+## Modules tab via displayAdminProductsExtra
+
+The `hookDisplayAdminProductsExtra` hook returns a rendered Twig template displayed in the dedicated **Modules** tab of the product form:
+
+```php
+public function hookDisplayAdminProductsExtra(array $params): string
+{
+    $productId = $params['id_product'];
+    $customProduct = new CustomProduct($productId);
+
+    /** @var Environment $twig */
+    $twig = $this->get('twig');
+
+    return $twig->render('@Modules/demoproductform/views/templates/admin/extra_module.html.twig', [
+        'customProduct' => $customProduct,
+    ]);
+}
+```
+
+This is the read-only display path. The Modules tab aggregates the output of all modules that implement `displayAdminProductsExtra`.

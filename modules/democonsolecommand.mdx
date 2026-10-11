@@ -1,0 +1,224 @@
+---
+title: "Create a Symfony Console Command for Your PrestaShop Module"
+sidebarTitle: "Console Command"
+description: "Register a Symfony console command in a PrestaShop module, inject module services, and run the command with php bin/console from the PrestaShop root."
+---
+
+PrestaShop 9 runs on Symfony, which means your module has full access to the Symfony Console component. A console command is a PHP class that extends `Symfony\Component\Console\Command\Command`, is registered as a service tagged `console.command`, and can be invoked from the terminal without touching a web browser. This is useful for scheduled tasks, bulk data imports, cache warming, and any maintenance job that benefits from a progress bar and structured output.
+
+The `democonsolecommand` module demonstrates the minimal implementation: a single command (`demo:list-manufacturers`) that queries PrestaShop's `Manufacturer` ObjectModel and renders the results as a formatted table.
+
+<Note>
+  Symfony console commands run inside the full **PrestaShop Symfony kernel**, so every service registered in the container — including module services — is available for injection. The minimum compatible version is **PrestaShop 9.0.0**.
+</Note>
+
+## Command anatomy
+
+### `configure()`
+
+Called once when the application is booting. Set the command name (the string used on the CLI) and its description:
+
+```php
+protected function configure()
+{
+    $this
+        ->setName('demo:list-manufacturers')
+        ->setDescription('Lists existing manufacturer names');
+}
+```
+
+The name follows the Symfony convention `namespace:verb-subject`. The namespace (`demo`) groups related commands in the output of `php bin/console list`.
+
+### `execute()`
+
+Called when the command is actually run. Receives an `InputInterface` (arguments and options) and an `OutputInterface` (writes to STDOUT). Return `0` for success or a non-zero integer for an error:
+
+```php
+protected function execute(InputInterface $input, OutputInterface $output)
+{
+    $manufacturers = Manufacturer::getManufacturers();
+
+    if (!$manufacturers) {
+        $output->writeln('<comment>There are no manufacturers</comment>');
+        return 0;
+    }
+
+    $rows = [];
+    foreach ($manufacturers as $manufacturer) {
+        $rows[] = [
+            $manufacturer['id_manufacturer'],
+            $manufacturer['name'],
+        ];
+    }
+
+    $table = new Table($output);
+    $table->setHeaders(['id', 'name'])
+        ->setRows($rows)
+        ->render();
+
+    return 0;
+}
+```
+
+## Full command class
+
+```php
+// src/Command/ListManufacturersCommand.php
+declare(strict_types=1);
+
+namespace PrestaShop\Module\DemoConsoleCommand\Command;
+
+use Manufacturer;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Helper\Table;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
+
+class ListManufacturersCommand extends Command
+{
+    /**
+     * {@inheritdoc}
+     */
+    protected function configure()
+    {
+        $this
+            ->setName('demo:list-manufacturers')
+            ->setDescription('Lists existing manufacturer names')
+        ;
+    }
+
+    protected function execute(InputInterface $input, OutputInterface $output)
+    {
+        $manufacturers = Manufacturer::getManufacturers();
+
+        if (!$manufacturers) {
+            $output->writeln('<comment>There are no manufacturers</comment>');
+
+            return 0;
+        }
+
+        $rows = [];
+        foreach ($manufacturers as $manufacturer) {
+            $rows[] = [
+                $manufacturer['id_manufacturer'],
+                $manufacturer['name'],
+            ];
+        }
+
+        $table = new Table($output);
+
+        $table->setHeaders(['id', 'name'])
+            ->setRows($rows)
+            ->render()
+        ;
+
+        return 0;
+    }
+}
+```
+
+The `Table` helper from the Console component formats rows into an ASCII table with column headers, making the output readable at a glance.
+
+## Registering the command as a service
+
+Tag the command class with `console.command` in `config/services.yml`:
+
+```yaml
+# config/services.yml
+services:
+    PrestaShop\Module\DemoConsoleCommand\Command\ListManufacturersCommand:
+        tags: [ console.command ]
+```
+
+Symfony's `console.command` tag is all that is needed. The kernel picks up the class, reads its `configure()` method, and registers `demo:list-manufacturers` in the application's command registry.
+
+<Note>
+  Symfony console commands run in the PS Symfony context, so all container services are available for injection. Add constructor arguments and matching `arguments:` entries in `services.yml` to inject any service — Doctrine connections, repositories, PrestaShop Core services, or your own module services.
+</Note>
+
+### Injecting PrestaShop services
+
+To inject a service into your command, add a constructor and declare the arguments in YAML:
+
+```php
+// Example — injecting a custom repository
+class ListManufacturersCommand extends Command
+{
+    public function __construct(
+        private readonly MyRepository $repository
+    ) {
+        parent::__construct();
+    }
+    // ...
+}
+```
+
+```yaml
+# config/services.yml
+services:
+    PrestaShop\Module\DemoConsoleCommand\Command\ListManufacturersCommand:
+        arguments:
+            - '@PrestaShop\Module\DemoConsoleCommand\Repository\MyRepository'
+        tags: [ console.command ]
+```
+
+## Running the command
+
+From the PrestaShop root directory:
+
+```bash
+php bin/console demo:list-manufacturers
+```
+
+Example output:
+
+```
++----+------------------+
+| id | name             |
++----+------------------+
+| 1  | Apple            |
+| 2  | Samsung          |
++----+------------------+
+```
+
+If there are no manufacturers:
+
+```
+There are no manufacturers
+```
+
+<Tip>
+  Use `php bin/console demo:list-manufacturers --help` to see the auto-generated help text, including the description you set in `configure()`. Add `->addArgument()` or `->addOption()` calls to `configure()` to accept runtime parameters.
+</Tip>
+
+## Installation
+
+<Steps>
+  <Step title="Copy the module">
+    Place the `democonsolecommand` directory inside your PrestaShop `modules/` folder. The directory name must match the module name (`democonsolecommand`).
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/democonsolecommand
+    composer install
+    ```
+    This generates the `vendor/autoload.php` required for PSR-4 namespace resolution.
+  </Step>
+  <Step title="Install the module">
+    From the Back Office **Module Manager**, or via CLI:
+    ```bash
+    php bin/console prestashop:module install democonsolecommand
+    ```
+  </Step>
+  <Step title="Run the command">
+    From the PrestaShop root:
+    ```bash
+    php bin/console demo:list-manufacturers
+    ```
+    You should see a table of all manufacturers currently in the database.
+  </Step>
+</Steps>
+
+<Warning>
+  Always run `php bin/console` from the **PrestaShop root directory** (the directory that contains `bin/`), not from inside the module directory. Running it elsewhere will fail to locate the kernel.
+</Warning>

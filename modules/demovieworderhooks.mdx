@@ -1,0 +1,348 @@
+---
+title: "Customize the Order View Page Using Back Office Hooks"
+sidebarTitle: "Order View Hooks"
+description: "Use the full set of displayAdminOrder* and actionGetAdminOrderButtons hooks to add tabs, listings, side panels, and navigation buttons to the Back Office order page."
+---
+
+The `demovieworderhooks` module is the authoritative reference for all hooks available on the PrestaShop Back Office order view page. It implements every `displayAdminOrder*` hook and `actionGetAdminOrderButtons`, demonstrating concrete use cases for each one: a scanned customer signature in the side panel, a package-tracking tab, customer satisfaction ratings, previous/next navigation buttons, and more. The module also demonstrates the `InstallerFactory` pattern for clean install/uninstall logic and uses Doctrine ORM for its persistence layer.
+
+<Note>
+This module requires **PrestaShop 9.0.0 or later** and Composer to install its dependencies.
+</Note>
+
+## Installation
+
+<Steps>
+  <Step title="Clone or download the module">
+    Place the module directory inside your PrestaShop `modules/` folder and ensure the folder is named `demovieworderhooks`.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/demovieworderhooks
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    Install via the Back Office Module Manager, or run:
+    ```bash
+    php bin/console prestashop:module install demovieworderhooks
+    ```
+  </Step>
+</Steps>
+
+## Hook reference
+
+The following table lists every hook implemented by this module, the location on the order page where it renders, and what the module displays there.
+
+| Hook | Location | Used for in this module |
+|---|---|---|
+| `displayAdminOrderTop` | Above the order title | Previous / next order navigation buttons |
+| `displayAdminOrderSide` | Right side panel (top area) | Customer signature image |
+| `displayAdminOrderSideBottom` | Right side panel (bottom area) | Customer satisfaction review widget |
+| `displayAdminOrderMain` | Main column content area | List of the customer's other delivered orders |
+| `displayAdminOrderMainBottom` | Main column, after the payments section | Extra block at the bottom of the main column |
+| `displayAdminOrder` | Injected into the main content | All other orders from the same customer |
+| `displayAdminOrderTabLink` | Tabs bar (new tab link) | "Package tracking" tab link |
+| `displayAdminOrderTabContent` | Tab content panel | Package tracking location listing |
+| `displayOrderPreview` | Quick preview popup on orders list | Lorem ipsum placeholder text |
+| `actionGetAdminOrderButtons` | Main action buttons bar | "View customer", "Go to PrestaShop", "Go to module's GitHub", "Create an order" buttons |
+| `displayAdminOrderCreateExtraButtons` | "More actions" dropdown on order creation page | Extra dropdown items |
+
+## Hook method signatures
+
+Here are the actual implementations from `demovieworderhooks.php`:
+
+### `hookActionGetAdminOrderButtons`
+
+Adds buttons to the header action bar using `ActionsBarButtonsCollection`:
+
+```php
+public function hookActionGetAdminOrderButtons(array $params)
+{
+    $order = new Order($params['id_order']);
+
+    /** @var \Symfony\Bundle\FrameworkBundle\Routing\Router $router */
+    $router = $this->get('router');
+
+    /** @var ActionsBarButtonsCollection $bar */
+    $bar = $params['actions_bar_buttons_collection'];
+
+    $viewCustomerUrl = $router->generate('admin_customers_view', ['customerId'=> (int)$order->id_customer]);
+    $bar->add(
+        new ActionsBarButton(
+            'btn-secondary', ['href' => $viewCustomerUrl], 'View customer'
+        )
+    );
+    $bar->add(
+        new ActionsBarButton(
+            'btn-info', ['href' => 'https://www.prestashop.com/'], 'Go to PrestsaShop'
+        )
+    );
+    $bar->add(
+        new ActionsBarButton(
+            'btn-dark', ['href' => 'https://github.com/PrestaShop/example-modules/tree/master/demovieworderhooks'], 'Go to module\'s GitHub'
+        )
+    );
+    $createAnOrderUrl = $router->generate('admin_orders_create');
+    $bar->add(
+        new ActionsBarButton(
+            'btn-link', ['href' => $createAnOrderUrl], 'Create an order'
+        )
+    );
+}
+```
+
+### `hookDisplayAdminOrderSide`
+
+Displays the customer signature in the right-hand side panel:
+
+```php
+public function hookDisplayAdminOrderSide(array $params)
+{
+    /** @var OrderSignatureRepository $signatureRepository */
+    $signatureRepository = $this->get('prestashop.module.demovieworderhooks.repository.order_signature_repository');
+
+    /** @var OrderSignaturePresenter $signaturePresenter */
+    $signaturePresenter = $this->get('prestashop.module.demovieworderhooks.presenter.order_signature_presenter');
+
+    $signature = $signatureRepository->findOneByOrderId($params['id_order']);
+
+    if (!$signature) {
+        return '';
+    }
+
+    return $this->render($this->getModuleTemplatePath() . 'customer_signature.html.twig', [
+        'signature' => $signaturePresenter->present($signature, (int) $this->context->language->id),
+    ]);
+}
+```
+
+### `hookDisplayAdminOrderTabLink` and `hookDisplayAdminOrderTabContent`
+
+These two hooks work as a pair: `TabLink` adds the clickable tab to the tab bar, and `TabContent` provides the panel rendered when that tab is active.
+
+```php
+public function hookDisplayAdminOrderTabLink(array $params)
+{
+    return $this->render($this->getModuleTemplatePath() . 'tracking_link.html.twig');
+}
+
+public function hookDisplayAdminOrderTabContent(array $params)
+{
+    /** @var PackageLocationRepository $locationRepository */
+    $locationRepository = $this->get('prestashop.module.demovieworderhooks.repository.package_location_repository');
+
+    $locations = $locationRepository->findBy(
+        ['orderId' => $params['id_order']],
+        ['position' => 'asc']
+    );
+
+    /** @var PackageLocationsPresenter $locationsPresenter */
+    $locationsPresenter = $this->get('prestashop.module.demovieworderhooks.presenter.package_locations_presenter');
+
+    return $this->render($this->getModuleTemplatePath() . 'tracking.html.twig', [
+        'packageLocations' => $locationsPresenter->present($locations),
+    ]);
+}
+```
+
+### `hookDisplayAdminOrderTop`
+
+Renders previous/next order navigation by querying the adjacent order IDs:
+
+```php
+public function hookDisplayAdminOrderTop(array $params)
+{
+    /** @var OrderRepository $orderRepository */
+    $orderRepository = $this->get('prestashop.module.demovieworderhooks.repository.order_repository');
+
+    /** @var OrderLinkPresenter $orderLinkPresenter */
+    $orderLinkPresenter = $this->get('prestashop.module.demovieworderhooks.presenter.order_link_presenter');
+
+    $nextOrderId = $orderRepository->getNextOrderId((int) $params['id_order']);
+    $previousOrderId = $orderRepository->getPreviousOrderId((int) $params['id_order']);
+
+    return $this->render($this->getModuleTemplatePath() . 'order_navigation.html.twig', [
+        'previousOrder' => $orderLinkPresenter->present($previousOrderId),
+        'nextOrder' => $orderLinkPresenter->present($nextOrderId),
+    ]);
+}
+```
+
+### `hookDisplayOrderPreview`
+
+Fires on the Orders listing quick-preview popup:
+
+```php
+public function hookDisplayOrderPreview(array $params)
+{
+    $orderId = $params['order_id']; // access to id of the order
+
+    return (new joshtronic\LoremIpsum())->sentence();
+}
+```
+
+## The package-tracking tab template
+
+The `tracking.html.twig` template rendered by `hookDisplayAdminOrderTabContent` uses a Bootstrap tab panel structure. The `id` and `aria-labelledby` attributes must match those set by the corresponding `tracking_link.html.twig`:
+
+```twig
+{# views/templates/admin/tracking.html.twig #}
+{% trans_default_domain 'Module.Demovieworderhooks.Admin' %}
+
+<div class="tab-pane fade show active" id="trackingTabContent" role="tabpanel" aria-labelledby="trackingTab">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>{{ 'Location'|trans }}</th>
+        <th>{{ 'Arrival date'|trans }}</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% if packageLocations is empty %}
+      <tr>
+        <td>-</td>
+        <td>-</td>
+      </tr>
+    {% else %}
+      {% for packageLocation in packageLocations %}
+        <tr>
+          <td>{{ packageLocation.location }}</td>
+          <td>
+            {% if not packageLocation.hasArrived %}
+              <span class="badge badge-danger">
+              {{ packageLocation.date }}
+              </span>
+            {% else %}
+              {{ packageLocation.date }}
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    {% endif %}
+    </tbody>
+  </table>
+</div>
+```
+
+The reusable `card.html.twig` base template provides a consistent Bootstrap card wrapper for content blocks used by other hooks:
+
+```twig
+{# views/templates/admin/card.html.twig #}
+{% trans_default_domain 'Module.Demovieworderhooks.Admin' %}
+
+<div class="card mt-2">
+  <div class="card-header">
+    <h3 class="card-header-title">
+      {% block card_title %}
+      {% endblock %}
+    </h3>
+  </div>
+
+  <div class="card-body">
+    {% block card_body %}
+    {% endblock %}
+  </div>
+</div>
+```
+
+Templates like `customer_orders.html.twig` extend this card template and fill the `card_title` and `card_body` blocks.
+
+## The `OrderSignature` Doctrine entity
+
+The module persists customer signatures using Doctrine ORM. The `OrderSignature` entity maps to the `ps_order_signature` table and stores the order ID and signature filename:
+
+```php
+// src/Entity/OrderSignature.php
+/**
+ * @ORM\Entity(repositoryClass="PrestaShop\Module\DemoViewOrderHooks\Repository\OrderSignatureRepository")
+ */
+class OrderSignature
+{
+    /**
+     * @ORM\Id
+     * @ORM\Column(name="id_signature", type="integer")
+     * @ORM\GeneratedValue(strategy="AUTO")
+     */
+    private ?int $id;
+
+    /**
+     * @ORM\Column(name="id_order", type="integer")
+     */
+    private int $orderId;
+
+    /**
+     * @ORM\Column(name="filename", type="string")
+     */
+    private string $filename;
+
+    // ... getters and setters
+}
+```
+
+## The `InstallerFactory` pattern
+
+The module separates install/uninstall logic into dedicated classes following the Single Responsibility Principle. `InstallerFactory::create()` wires the `Installer` and its `FixturesInstaller` dependency, so the main module file only needs one call:
+
+```php
+// src/Install/InstallerFactory.php
+class InstallerFactory
+{
+    public static function create(): Installer
+    {
+        return new Installer(
+            new FixturesInstaller(Db::getInstance())
+        );
+    }
+}
+```
+
+```php
+// demovieworderhooks.php
+public function install()
+{
+    if (!parent::install()) {
+        return false;
+    }
+
+    $installer = InstallerFactory::create();
+
+    return $installer->install($this);
+}
+
+public function uninstall()
+{
+    $installer = InstallerFactory::create();
+
+    return $installer->uninstall() && parent::uninstall();
+}
+```
+
+<Tip>
+The `InstallerFactory` pattern keeps the main module file free of database queries and hook registration details. It also makes the installer independently testable.
+</Tip>
+
+The `Installer::install()` method registers all hooks, creates the required database tables, and seeds fixture data through `FixturesInstaller`:
+
+```php
+// src/Install/Installer.php
+private function registerHooks(Module $module): bool
+{
+    // All hooks in the order view page.
+    $hooks = [
+        'displayAdminOrderTabContent',
+        'displayAdminOrderTabLink',
+        'displayAdminOrderMain',
+        'displayAdminOrderMainBottom',
+        'displayAdminOrderSide',
+        'displayAdminOrderSideBottom',
+        'displayAdminOrder',
+        'displayOrderPreview',
+        'displayAdminOrderTop',
+        'displayAdminOrderCreateExtraButtons',
+        'actionGetAdminOrderButtons',
+    ];
+
+    return (bool) $module->registerHook($hooks);
+}
+```

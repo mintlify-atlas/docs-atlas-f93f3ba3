@@ -1,0 +1,295 @@
+---
+title: "Build Admin Configuration Pages with Symfony Form Types"
+sidebarTitle: "Symfony Forms"
+description: "Use PrestaShop's built-in Symfony form types to create multi-form configuration pages with data providers, handlers, and geo-coordinates inputs."
+---
+
+The `demosymfonyform` module is a comprehensive showcase of every Symfony form type that ships with PrestaShop. It provides multiple configuration pages, each demonstrating a different category of input widget — from translatable text fields and rich-text editors to category trees, country selectors, material choice tables, and a custom compound geo-coordinates type. If you want to understand what form inputs PrestaShop provides out of the box and how to wire them up with the `FormDataProvider`/`FormDataHandler` architecture, this is the reference module to study.
+
+<Note>
+This module requires **PrestaShop 9.0.0 or later** and Composer.
+</Note>
+
+## Why Symfony forms over `HelperForm`?
+
+PrestaShop ships both `HelperForm` (legacy) and Symfony-based forms. The README explains the tradeoffs clearly:
+
+- **Type safety and validation in one place** — a Symfony form type defines both the data shape and its constraints.
+- **Reusability** — form types are classes you can extend, decorate, or compose.
+- **PrestaShop UI Kit out of the box** — PrestaShop's own form types (`SwitchType`, `TranslatableType`, `CategoryChoiceTreeType`, and more) render correctly in the Back Office without any extra configuration.
+- **Extensibility by other modules** — other modules can modify forms via `actionXxxFormBuilderModifier` hooks.
+- **Testability** — form types have no global state and can be unit-tested in isolation.
+
+For a simple page with two or three fields that will never be extended, `HelperForm` is still reasonable. The Symfony form architecture becomes worth it as forms grow in complexity.
+
+## Architecture: `FormDataProvider` → `FormDataHandler`
+
+The module follows a strict layered pattern for each form on each page:
+
+```
+FormType (Symfony form type definition)
+    ↕
+FormDataProvider (reads/writes form data via DataConfiguration)
+    ↕
+DataConfiguration (reads/writes values from PrestaShop Configuration table)
+    ↕
+Handler (PrestaShop core Form\Handler — ties them together)
+```
+
+The `Controller` only interacts with the `FormHandlerInterface`. It never touches the database directly.
+
+### `DataConfiguration`: storage layer
+
+`DemoConfigurationTextDataConfiguration` implements `DataConfigurationInterface`. Its job is to read from and write to the PrestaShop `Configuration` table using constant-named keys:
+
+```php
+// src/Form/DemoConfigurationTextDataConfiguration.php
+final class DemoConfigurationTextDataConfiguration implements DataConfigurationInterface
+{
+    public const TRANSLATABLE_SIMPLE = 'DEMO_SYMFONY_FORM_TRANSLATABLE_SIMPLE_TYPE';
+    public const GEOCOORDINATES_TYPE_LAT = 'DEMO_SYMFONY_FORM_GEOCOORDINATES_TYPE_LAT';
+    public const GEOCOORDINATES_TYPE_LON = 'DEMO_SYMFONY_FORM_GEOCOORDINATES_TYPE_LON';
+    // ... other constants
+
+    public function getConfiguration(): array
+    {
+        $return = [];
+
+        if ($translatableSimple = $this->configuration->get(static::TRANSLATABLE_SIMPLE)) {
+            $return['translatable_type'] = $translatableSimple;
+        }
+        if ($geoCoordinatesLat = $this->configuration->get(static::GEOCOORDINATES_TYPE_LAT)) {
+            $return['latitude'] = $geoCoordinatesLat;
+        }
+        if ($geoCoordinatesLon = $this->configuration->get(static::GEOCOORDINATES_TYPE_LON)) {
+            $return['longitude'] = $geoCoordinatesLon;
+        }
+        // ...
+        return $return;
+    }
+
+    public function updateConfiguration(array $configuration): array
+    {
+        $this->configuration->set(static::TRANSLATABLE_SIMPLE, $configuration['translatable_type']);
+        // Adding html => true allows saving HTML values
+        $this->configuration->set(
+            static::TRANSLATABLE_FORMATTED_TEXT_AREA,
+            $configuration['translatable_formatted_text_area_type'],
+            null,
+            ['html' => true]
+        );
+        $this->configuration->set(static::GEOCOORDINATES_TYPE_LAT, $configuration['latitude']);
+        $this->configuration->set(static::GEOCOORDINATES_TYPE_LON, $configuration['longitude']);
+        // ...
+        return []; // return validation errors here if any
+    }
+}
+```
+
+<Tip>
+Pass `['html' => true]` as the fourth argument to `$this->configuration->set()` when storing HTML from rich-text editor fields. Without it, HTML tags are stripped on save.
+</Tip>
+
+### `FormDataProvider`: bridge layer
+
+`DemoConfigurationTextFormDataProvider` implements `FormDataProviderInterface`. It delegates entirely to the `DataConfiguration`:
+
+```php
+// src/Form/DemoConfigurationTextFormDataProvider.php
+class DemoConfigurationTextFormDataProvider implements FormDataProviderInterface
+{
+    public function __construct(
+        private readonly DataConfigurationInterface $demoConfigurationTextDataConfiguration
+    ) {}
+
+    public function getData(): array
+    {
+        return $this->demoConfigurationTextDataConfiguration->getConfiguration();
+    }
+
+    public function setData(array $data): array
+    {
+        return $this->demoConfigurationTextDataConfiguration->updateConfiguration($data);
+    }
+}
+```
+
+### Controller: clean and thin
+
+The controller receives a `FormHandlerInterface` via PHP 8 `#[Autowire]` attribute injection. It never instantiates forms or touches configuration storage directly:
+
+```php
+// src/Controller/DemoConfigurationController.php
+class DemoConfigurationController extends PrestaShopAdminController
+{
+    public function index(
+        Request $request,
+        #[Autowire(service: 'prestashop.module.demosymfonyform.form.demo_configuration_text_form_data_handler')]
+        FormHandlerInterface $textFormDataHandler,
+    ): Response {
+        $textForm = $textFormDataHandler->getForm();
+        $textForm->handleRequest($request);
+
+        if ($textForm->isSubmitted() && $textForm->isValid()) {
+            $errors = $textFormDataHandler->save($textForm->getData());
+
+            if (empty($errors)) {
+                $this->addFlash('success', $this->trans('Successful update.', [], 'Admin.Notifications.Success'));
+                return $this->redirectToRoute('demo_configuration_form');
+            }
+
+            $this->addFlashErrors($errors);
+        }
+
+        return $this->render('@Modules/demosymfonyform/views/templates/admin/form.html.twig', [
+            'demoConfigurationTextForm' => $textForm->createView(),
+        ]);
+    }
+}
+```
+
+After a successful save the controller redirects back (PRG pattern). Errors returned from `save()` are displayed as flash error messages via `addFlashErrors()`.
+
+## `DemoConfigurationChoiceType`: PrestaShop choice widgets
+
+This form type demonstrates every PrestaShop-provided choice widget in a single form. It extends `TranslatorAwareType` so translations work without injecting the translator manually:
+
+```php
+// src/Form/DemoConfigurationChoiceType.php
+class DemoConfigurationChoiceType extends TranslatorAwareType
+{
+    public function buildForm(FormBuilderInterface $builder, array $options): void
+    {
+        $disabledCategories = [5];
+
+        $builder
+            ->add('category_choice_tree_type', CategoryChoiceTreeType::class, [
+                'label' => $this->trans('Category choice type', 'Modules.DemoSymfonyForm.Admin'),
+                'disabled_values' => $disabledCategories,
+            ])
+            ->add('country_choice_type', CountryChoiceType::class, [
+                'label' => $this->trans('Country choice type', 'Modules.DemoSymfonyForm.Admin'),
+                'required' => true,
+                'with_dni_attr' => true,
+                'with_postcode_attr' => true,
+            ])
+            ->add('material_choice_table_type', MaterialChoiceTableType::class, [
+                'label' => $this->trans('Material choice table type', 'Modules.DemoSymfonyForm.Admin'),
+                'choices' => [
+                    $this->trans('Choice 1', 'Modules.DemoSymfonyForm.Admin') => '1',
+                    $this->trans('Choice 2', 'Modules.DemoSymfonyForm.Admin') => '2',
+                ],
+            ])
+            ->add('material_choice_tree_type', MaterialChoiceTreeType::class, [
+                'label' => $this->trans('Material choice tree type', 'Modules.DemoSymfonyForm.Admin'),
+                'choice_value' => 'id_choice',
+                'choices_tree' => [
+                    '1' => ['id_choice' => 1, 'name' => $this->trans('Choice 1', 'Modules.DemoSymfonyForm.Admin')],
+                    '2' => [
+                        'id_choice' => 2,
+                        'name' => $this->trans('Choice 2', 'Modules.DemoSymfonyForm.Admin'),
+                        'children' => [
+                            '3' => ['id_choice' => 3, 'name' => $this->trans('Choice 3', 'Modules.DemoSymfonyForm.Admin')],
+                            '4' => ['id_choice' => 4, 'name' => $this->trans('Choice 4', 'Modules.DemoSymfonyForm.Admin')],
+                        ],
+                    ],
+                ],
+            ])
+            ->add('shop_choices_tree_type', ShopChoiceTreeType::class, [
+                'label' => $this->trans('Material choice tree type', 'Modules.DemoSymfonyForm.Admin'),
+            ])
+            ->add('switch_type', SwitchType::class, [
+                'label' => $this->trans('Switch type', 'Modules.DemoSymfonyForm.Admin'),
+            ]);
+    }
+
+    public function configureOptions(OptionsResolver $resolver): void
+    {
+        parent::configureOptions($resolver);
+        $resolver->setDefaults([
+            'form_theme' => '@PrestaShop/Admin/TwigTemplateForm/prestashop_ui_kit.html.twig',
+        ]);
+    }
+}
+```
+
+Key PrestaShop form types used here:
+
+| Type class | What it renders |
+|---|---|
+| `CategoryChoiceTreeType` | Category tree picker with optional disabled nodes |
+| `CountryChoiceType` | Country dropdown with optional DNI/postcode metadata |
+| `MaterialChoiceTableType` | Radio group rendered as a Material Design table |
+| `MaterialChoiceTreeType` | Hierarchical checkbox tree |
+| `MaterialMultipleChoiceTableType` | Matrix of checkboxes (vertical × horizontal choices) |
+| `ShopChoiceTreeType` | Shop/shop-group tree for multi-store setups |
+| `SwitchType` | PrestaShop toggle switch |
+
+## Service wiring
+
+Each form has its own `data_configuration`, `data_provider`, `form_handler`, and `form_type` service. The handler is always the PrestaShop core `Form\Handler` class, which wires them all together and dispatches the `actionXxxFormBuilderModifier` hook:
+
+```yaml
+# config/services.yml
+prestashop.module.demosymfonyform.form.demo_configuration_text_form_data_handler:
+  class: 'PrestaShop\PrestaShop\Core\Form\Handler'
+  arguments:
+    - '@form.factory'
+    - '@prestashop.core.hook.dispatcher'
+    - '@prestashop.module.demosymfonyform.form.demo_configuration_text_form_data_provider'
+    - 'PrestaShop\Module\DemoSymfonyForm\Form\DemoConfigurationTextType'
+    - 'DemoConfiguration'
+
+prestashop.module.demosymfonyform.form.demo_configuration_text_data_configuration:
+  class: PrestaShop\Module\DemoSymfonyForm\Form\DemoConfigurationTextDataConfiguration
+  arguments: ['@prestashop.adapter.legacy.configuration']
+```
+
+The fifth argument to `Handler` (`'DemoConfiguration'`) is the hook name suffix — the hook `actionDemoConfigurationFormBuilderModifier` will be dispatched when `getForm()` is called, letting other modules add or modify fields.
+
+## Tab registration via `getTabs()`
+
+This module uses `getTabs()` (rather than the `$this->tabs` constructor property) to register navigation entries:
+
+```php
+public function getTabs()
+{
+    return [
+        [
+            'class_name' => 'AdminDemoSymfonyForm',
+            'visible' => true,
+            'name' => 'Admin symfony form single',
+            'parent_class_name' => 'CONFIGURE',
+        ],
+        [
+            'class_name' => 'AdminDemoSymfonyFormMultipleForms',
+            'visible' => true,
+            'name' => 'Admin symfony form multiple forms',
+            'parent_class_name' => 'CONFIGURE',
+        ],
+    ];
+}
+```
+
+## Installation
+
+<Steps>
+  <Step title="Clone or download the module">
+    Place the module in your PrestaShop `modules/` directory, ensuring the folder is named `demosymfonyform`.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/demosymfonyform
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    Install via the Back Office Module Manager, or run:
+    ```bash
+    php bin/console prestashop:module install demosymfonyform
+    ```
+  </Step>
+  <Step title="Explore the form pages">
+    Click **Configure** to be redirected to the text form page. Use the sidebar tabs to switch between the single-form page, the multiple-forms page, and the geo-coordinates demo.
+  </Step>
+</Steps>

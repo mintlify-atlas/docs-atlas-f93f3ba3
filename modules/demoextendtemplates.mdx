@@ -1,0 +1,299 @@
+---
+title: "Override and Extend Admin Twig Templates in a Module"
+sidebarTitle: "Extend Templates"
+description: "Override PrestaShop admin Twig templates, extend Twig blocks, add custom flash message types, and decorate controllers without modifying core files."
+---
+
+The `demoextendtemplates` module is the reference example for customizing PrestaShop's Symfony-based Back Office pages through Twig template overrides. It shows how to shadow a core template with your own, extend individual Twig blocks within an overridden template (including blocks defined in included sub-templates), add a custom flash message type that survives the layout render cycle, and decorate a core controller using Symfony's `#[AsDecorator]` attribute — all without touching a single core file. It also presents an alternative, lighter-weight approach using a Kernel event subscriber.
+
+<Note>
+This module requires **PrestaShop 9.1.0 or later**.
+</Note>
+
+## Installation
+
+<Steps>
+  <Step title="Clone or download the module">
+    Place the module directory inside your PrestaShop `modules/` folder and ensure the folder is named `demoextendtemplates`.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/demoextendtemplates
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    Install via the Back Office Module Manager, or run:
+    ```bash
+    php bin/console prestashop:module install demoextendtemplates
+    ```
+  </Step>
+</Steps>
+
+## The Twig path-shadow technique
+
+PrestaShop's Twig loader checks module template directories before the core. To replace a core template, place a file in your module at the same relative path the core uses under its `views/PrestaShop/` directory. For example, to override the Orders listing page:
+
+```
+# Core path
+src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/index.html.twig
+
+# Module override path
+demoextendtemplates/views/PrestaShop/Admin/Sell/Order/Order/index.html.twig
+```
+
+The module's file is found first and is loaded instead of the core's. To keep the original content, the override template extends the core using the `@PrestaShopCore` namespace:
+
+```twig
+{# views/PrestaShop/Admin/Sell/Order/Order/index.html.twig #}
+{# It is important to follow the path for index.html.twig as it is in prestashop,
+   so that your template is loaded instead of the original one. #}
+{% extends '@PrestaShopCore/Admin/Sell/Order/Order/index.html.twig' %}
+
+{# modify the content block #}
+{% block content %}
+  {# call parent if you want to see all the original content rendered #}
+  {{ parent() }}
+  <div class="text-success">
+    <p>Extended block content in demoextendtemplates module</p>
+  </div>
+{% endblock %}
+```
+
+<Tip>
+Always call `{{ parent() }}` inside your overridden block if you want the original content to remain. Omitting it replaces the block entirely.
+</Tip>
+
+## Extending blocks in included sub-templates
+
+Some Twig blocks are not directly rendered in the template you override — they live inside a file that the parent template includes. To modify those blocks, use Twig's `{% embed %}` tag, which lets you reopen specific blocks in an included template. The module overrides the `grid_panel_header` block inside the Orders grid panel:
+
+```twig
+{% block order_grid_row %}
+  {#
+    Modify a block which is not directly rendered in extended template, but in some included file.
+    We need to "embed" the same file that is included in original index.html.twig
+    and then we can modify the blocks inside it.
+    Note that we also need to pass the variables as the orderGrid in this example.
+  #}
+  {% embed '@PrestaShop/Admin/Common/Grid/grid_panel.html.twig' with {'grid': orderGrid} %}
+    {% block grid_panel_header %}
+    {#
+      Note: Current example focuses on the concept of extending twig blocks,
+      but the grid itself can be also modified using hooks
+      like displayAdminGridTableBefore, displayAdminGridTableAfter, actionOrderGridDefinitionModifier etc.
+    #}
+      <div>
+        <div class="float-right m-5">
+          <i class="material-icons mi-shopping_basket">shopping_basket</i>
+          <a href="#">My custom header for orders grid from a demoextendtemplates module</a>
+        </div>
+      </div>
+    {% endblock %}
+  {% endembed %}
+{% endblock %}
+```
+
+## Custom flash message types
+
+PrestaShop's `layout.html.twig` renders flash messages using a `session_alert` block and an `alert` macro. To add your own flash type, shadow `layout.html.twig` in the same way and extend the `session_alert` block:
+
+```twig
+{# views/PrestaShop/Admin/layout.html.twig #}
+{# First, we extend the original layout.html.twig #}
+{% extends '@PrestaShopCore/Admin/layout.html.twig' %}
+
+{# Then, we override the block we want to change #}
+{% block session_alert %}
+  {# import _self as layout is important, else the layout variable wouldn't be recognized #}
+  {% import _self as layout %}
+  {# render the original content from parent #}
+  {{ parent() }}
+  {# add our own custom flash #}
+  {% if app.session.flashbag.peek('demoextendtemplates-success')|length() > 0 %}
+    {# you can modify the css of "my-custom-class" however you want in your module css files  #}
+    <div class="some-kind-of-wrapper-class-if-needed">
+        {{ layout.alert('demoextendtemplates-success', app.session.flashbag.get('demoextendtemplates-success')) }}
+    </div>
+  {% endif %}
+
+  {#
+    We can even override the macro and change how the layout.alert works inside.
+    Be aware that this will change the behavior of all the flash messages in the whole back office.
+  #}
+  {% macro alert(type, flashbagContent) %}
+    {#
+      the "alert-{{ type }}" will end up rendering class "alert-demoextendtemplates-success",
+      which you can modify however you want in your module css files.
+      See demoextendtemplates/views/layout.css for example
+    #}
+    <div class="alert alert-{{ type }} d-print-none" role="alert">
+      {% if flashbagContent|length > 1 %}
+        <ul class="alert-text">
+          {% for flashMessage in flashbagContent %}
+            <li>{{ flashMessage|raw }}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <div class="alert-text">
+          {% for flashMessage in flashbagContent %}
+            {# lets say we want to add a link when there is only one flash message #}
+            <a href="#">
+              <i class="material-icons mi-chat">chat</i>
+              {# note the "|raw" - it means you can provide html content as a message and it will be rendered #}
+              {{ flashMessage|raw }}
+            </a>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </div>
+  {% endmacro %}
+{% endblock %}
+
+{% block stylesheets %}
+  {{ parent() }}
+  {# Include our custom css for layout #}
+  <link rel="stylesheet" href="{{ asset('../modules/demoextendtemplates/views/css/layout.css') }}"/>
+{% endblock %}
+```
+
+<Warning>
+Overriding `layout.html.twig` affects the **entire Back Office** because it is the base layout extended by all admin pages. Keep your changes narrow and always call `{{ parent() }}`.
+</Warning>
+
+## Controller decoration with `#[AsDecorator]`
+
+The module demonstrates how to inject behavior into an existing core controller using Symfony's decorator pattern. `DecoratedOrderController` wraps `OrderController` and adds a custom flash message to `indexAction` before delegating to the inner controller:
+
+```php
+// src/Controller/DecoratedOrderController.php
+#[AsDecorator(OrderController::class)]
+class DecoratedOrderController extends PrestaShopAdminController
+{
+    public function __construct(
+        #[MapDecorated] private readonly OrderController $orderController
+    ) {
+    }
+
+    public function indexAction(
+        Request $request,
+        OrderFilters $filters,
+        #[Autowire(service: 'prestashop.core.kpi_row.factory.orders')] KpiRowFactoryInterface $orderKpiFactory,
+        #[Autowire(service: 'prestashop.core.grid.factory.order')] GridFactory $orderGridFactory,
+    )
+    {
+        $this->addFlash('demoextendtemplates-success', 'Custom success flash from demoextendtemplates module');
+
+        return $this->orderController->indexAction($request, $filters, $orderKpiFactory, $orderGridFactory);
+    }
+
+    // ... all other OrderController methods are proxied unchanged
+}
+```
+
+The `#[AsDecorator]` attribute tells Symfony to replace `OrderController` in the container with `DecoratedOrderController`. `#[MapDecorated]` injects the original `OrderController` as `$orderController`. Every other method simply delegates to `$this->orderController`.
+
+The decorator is registered in `config/services.yml`:
+
+```yaml
+services:
+  # The decoration is defined thanks to the #[AsDecorator] and #[MapDecorated] attributes in the class itself
+  PrestaShop\Module\DemoExtendTemplates\Controller\DecoratedOrderController:
+    autowire: true
+    autoconfigure: true
+```
+
+## Alternative: Kernel event subscriber
+
+If you only need to run side effects before or after a controller action — not modify its return value or injected arguments — a Symfony event subscriber on `KernelEvents::CONTROLLER` is simpler and less fragile:
+
+```php
+// src/EventSubscriber/OrderControllerSubscriber.php
+class OrderControllerSubscriber implements EventSubscriberInterface
+{
+    public function __construct(
+        private readonly RequestStack $requestStack,
+        private readonly LoggerInterface $logger,
+    ) {
+    }
+
+    public static function getSubscribedEvents(): array
+    {
+        return [
+            KernelEvents::CONTROLLER => 'onController',
+        ];
+    }
+
+    private function onIndexAction(): void
+    {
+        $this->requestStack->getSession()->getFlashBag()->add(
+            'demoextendtemplates-success',
+            'Custom success flash from demoextendtemplates module'
+        );
+    }
+
+    private function onDeleteProductAction(ControllerEvent $event): void
+    {
+        $request = $event->getRequest();
+
+        $this->logger->warning('Attempt to delete a product from an order was blocked.', [
+            'orderId' => $request->attributes->get('orderId'),
+            'orderDetailId' => $request->attributes->get('orderDetailId'),
+        ]);
+
+        $event->setController(
+            fn () => new JsonResponse(
+                ['message' => 'Deleting products from orders is not allowed.'],
+                Response::HTTP_FORBIDDEN
+            )
+        );
+    }
+
+    public function onController(ControllerEvent $event): void
+    {
+        $controller = $event->getController();
+
+        if (!is_array($controller)) {
+            return;
+        }
+
+        [$instance, $method] = $controller;
+
+        if (!$instance instanceof OrderController) {
+            return;
+        }
+
+        match ($method) {
+            'indexAction' => $this->onIndexAction(),
+            'deleteProductAction' => $this->onDeleteProductAction($event),
+            default => null,
+        };
+    }
+}
+```
+
+To use the subscriber instead of the decorator, comment out the decorator in `config/services.yml` and uncomment the subscriber:
+
+```yaml
+services:
+  # Uncomment to use instead of the decorator above (and comment out the decorator).
+  #PrestaShop\Module\DemoExtendTemplates\EventSubscriber\OrderControllerSubscriber:
+  #  autowire: true
+  #  autoconfigure: true
+```
+
+## Decorator vs. event subscriber — when to use each
+
+| Concern | Decorator | Event subscriber |
+|---|---|---|
+| Modify the controller's return value | ✅ Yes | ❌ No (use `KernelEvents::RESPONSE` instead) |
+| Modify or inspect injected action arguments | ✅ Yes | ❌ No |
+| Run side effects before an action | ✅ Yes | ✅ Yes |
+| Intercept and replace an action entirely | ✅ Yes | ✅ Yes (via `$event->setController()`) |
+| Fail fast if core renames a method | ✅ PHP fatal error | ❌ Silently stops working |
+| Performance overhead | Low (one proxy) | Runs on every request |
+| Risk of conflict with other modules | Higher (only one decorator per service) | Lower (many subscribers can coexist) |
+
+<Tip>
+Use the decorator when you need to wrap the controller's output or intercept its inputs. Use the event subscriber when you only need simple side effects such as logging, access checks, or adding flash messages.
+</Tip>

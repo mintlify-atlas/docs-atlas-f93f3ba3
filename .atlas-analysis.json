@@ -1,0 +1,128 @@
+{
+  "projectType": "framework",
+  "projectName": "PrestaShop Example Modules",
+  "projectDescription": "A collection of official reference modules demonstrating how to build, extend, and integrate with PrestaShop using modern Symfony-based patterns.",
+  "theme": "palm",
+  "primaryColor": "#fc6c34",
+  "lightColor": "#fcb494",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Getting Started",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/module-structure",
+              "concepts/hooks",
+              "concepts/doctrine-orm",
+              "concepts/symfony-integration"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Module Examples",
+        "groups": [
+          {
+            "group": "Admin UI",
+            "pages": [
+              "modules/democontrollertabs",
+              "modules/demosymfonyform",
+              "modules/demosymfonyformsimple",
+              "modules/demo-grid",
+              "modules/dashexample"
+            ]
+          },
+          {
+            "group": "Extending Core Forms",
+            "pages": [
+              "modules/demoextendsymfonyform1",
+              "modules/demoextendsymfonyform2",
+              "modules/demoextendsymfonyform3",
+              "modules/demoproductform",
+              "modules/demoformdataproviders"
+            ]
+          },
+          {
+            "group": "Data & Persistence",
+            "pages": [
+              "modules/demodoctrine",
+              "modules/demooverrideobjectmodel",
+              "modules/demoentityimporter",
+              "modules/demomultistoreform"
+            ]
+          },
+          {
+            "group": "Templates, Hooks & Routing",
+            "pages": [
+              "modules/demoextendtemplates",
+              "modules/demoextendgrid",
+              "modules/demovieworderhooks",
+              "modules/demojsrouting",
+              "modules/demomoduleroutes",
+              "modules/demoextraproperty",
+              "modules/demoproductextracontent"
+            ]
+          },
+          {
+            "group": "API & Integrations",
+            "pages": [
+              "modules/api-module",
+              "modules/demowsextend",
+              "modules/democonsolecommand",
+              "modules/demofiltermodules",
+              "modules/demoseo",
+              "modules/example-module-mailtheme"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "26 official reference modules covering the full PrestaShop extension surface",
+    "Symfony controller registration with automatic and manual tab creation",
+    "Doctrine ORM entity management for custom database tables",
+    "Grid component usage and extension (custom grids, extra row actions)",
+    "Symfony form extension via identifiable-object hooks and form modifier pattern",
+    "Product page form extensibility (custom fields, tabs, CQRS commands)",
+    "Multistore-aware forms with shop association blocks and checkboxes",
+    "Admin Twig template overriding and controller decoration",
+    "API Platform resource integration for PrestaShop's new REST API",
+    "WebService extension for ObjectModel-backed resources",
+    "Symfony console command integration",
+    "JavaScript Router usage in module admin pages",
+    "Mail theme creation with Twig layouts and custom transformations",
+    "Hook-based filtering and module list customization"
+  ],
+  "publicApiSurface": [
+    "Module::install() / Module::uninstall()",
+    "Module::registerHook() — subscribes a module to a PrestaShop hook",
+    "actionProductFormBuilderModifier — hook to modify the product form builder",
+    "actionCombinationFormFormBuilderModifier — hook to extend the combination form",
+    "ProductCommandsBuilderInterface / CustomProductCommandsBuilder — CQRS command builder for product save",
+    "displayAdminOrderTabLink / displayAdminOrderTabContent / displayAdminOrderMain / displayAdminOrderSide — order page hooks",
+    "actionGetAdminOrderButtons — hook to add buttons to the order view",
+    "GridDefinitionFactoryInterface — defines columns, filters, and actions for a grid",
+    "GridQueryBuilderInterface — builds the Doctrine DBAL query powering a grid",
+    "FormDataProviderInterface — provides and saves form data",
+    "FormDataHandlerInterface — handles form submission and persistence",
+    "ApiResource / ApiProperty (API Platform) — declares a REST resource on PrestaShop's new API",
+    "StateProviderInterface / StateProcessorInterface — API Platform state handlers",
+    "WebserviceRequest::$controllerClassname — registers a custom WebService resource",
+    "demo:list-manufacturers — Symfony console command exposed by democonsolecommand",
+    "prestashop:module install <module_name> — CLI command to install any module",
+    "Module::hookDisplayHome() — front-office display hook handler",
+    "actionFrontControllerSetVariables — hook to modify front-office SEO/template variables",
+    "ModuleRoutes hook — registers custom front-office URL routes"
+  ]
+}

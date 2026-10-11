@@ -1,0 +1,530 @@
+---
+title: "Build Multistore-Compatible CRUD Forms in Your Module"
+sidebarTitle: "Multistore Forms"
+description: "Make module forms and CRUD listings fully multistore-compatible using shop association blocks, per-shop checkboxes, specific-settings dropdowns, and scoped listing filters."
+---
+
+The `demomultistoreform` module is the reference implementation for making a PrestaShop module's Back Office UI fully multistore-aware. It manages "content blocks" — simple entities with a title, description, and enable flag — and demonstrates every multistore feature a production module should implement: shop association on create/edit forms, a grid listing scoped to the current shop context, per-shop checkboxes on configuration forms, a specific-settings dropdown in "All Shops" context, and context-sensitive delete behaviour.
+
+<Note>
+  PrestaShop multistore must be **enabled** before the multistore-specific UI elements appear. Go to **Shop Parameters → General** and set **Enable multistore** to **Yes**, then create and configure at least one additional shop.
+</Note>
+
+## The four multistore features
+
+| Feature | Implementation |
+|---|---|
+| **Shop association block** | `ShopChoiceTreeType` field in `ContentBlockType` (create/edit form) |
+| **Scoped listing** | `ContentBlockQueryBuilder` joins `content_block_shop` and filters by `ShopContext` |
+| **Per-shop checkboxes** | `ContentBlockConfigurationType` extends `MultistoreConfigurationType` |
+| **Specific-settings dropdown** | Automatically rendered when the `multistore_configuration_key` option is set on a field |
+
+## Installation
+
+<Steps>
+  <Step title="Clone the module">
+    ```bash
+    cd modules/
+    cp -r example-modules/demomultistoreform demomultistoreform
+    ```
+  </Step>
+
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd demomultistoreform
+    composer install
+    ```
+  </Step>
+
+  <Step title="Install the module">
+    From the Back Office Module Manager, or via CLI:
+
+    ```bash
+    php bin/console prestashop:module install demomultistoreform
+    ```
+
+    The installer creates `ps_content_block` and `ps_content_block_shop` tables and registers the `displayFooterBefore` hook.
+  </Step>
+
+  <Step title="Enable multistore">
+    In **Shop Parameters → General**, set **Enable multistore** to **Yes**. Create at least one second shop to see the full multistore UI.
+  </Step>
+</Steps>
+
+## Database schema
+
+Two tables are created at install: a main `content_block` table and a many-to-many join table `content_block_shop` linking each block to the shops it is associated with:
+
+```sql
+-- Resources/install.sql
+CREATE TABLE IF NOT EXISTS PREFIX_content_block (
+    id_content_block INT AUTO_INCREMENT NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    description LONGTEXT NOT NULL,
+    enable TINYINT(1) NOT NULL,
+    PRIMARY KEY(id_content_block)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci ENGINE = InnoDB;
+
+CREATE TABLE IF NOT EXISTS PREFIX_content_block_shop (
+    id_content_block INT NOT NULL,
+    id_shop INT NOT NULL,
+    INDEX IDX_80518F36D6F01295 (id_content_block),
+    INDEX IDX_80518F36274A50A0 (id_shop),
+    PRIMARY KEY(id_content_block, id_shop)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci ENGINE = InnoDB;
+
+ALTER TABLE PREFIX_content_block_shop
+    ADD CONSTRAINT FK_80518F36D6F01295
+    FOREIGN KEY (id_content_block) REFERENCES PREFIX_content_block (id_content_block);
+
+ALTER TABLE PREFIX_content_block_shop
+    ADD CONSTRAINT FK_80518F36274A50A0
+    FOREIGN KEY (id_shop) REFERENCES PREFIX_shop (id_shop) ON DELETE CASCADE;
+```
+
+The `ON DELETE CASCADE` on `id_shop` means that if a PrestaShop shop is removed, all its `content_block_shop` associations are automatically cleaned up.
+
+## ContentBlock entity
+
+The Doctrine entity mirrors the schema above. Shop associations are modelled as a `@ORM\ManyToMany` relationship to `PrestaShopBundle\Entity\Shop`:
+
+```php
+// src/Entity/ContentBlock.php
+namespace PrestaShop\Module\DemoMultistoreForm\Entity;
+
+use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\Common\Collections\Collection;
+use Doctrine\ORM\Mapping as ORM;
+use PrestaShopBundle\Entity\Shop;
+
+/**
+ * @ORM\Table()
+ * @ORM\Entity
+ */
+class ContentBlock
+{
+    /**
+     * @ORM\Id
+     * @ORM\Column(name="id_content_block", type="integer")
+     * @ORM\GeneratedValue(strategy="AUTO")
+     */
+    private int $id;
+
+    /**
+     * @ORM\Column(name="title", type="string", length=255)
+     */
+    private string $title;
+
+    /**
+     * @ORM\Column(name="description", type="text")
+     */
+    private string $description;
+
+    /**
+     * @ORM\Column(name="enable", type="boolean")
+     */
+    private bool $enable;
+
+    /**
+     * @ORM\ManyToMany(targetEntity="PrestaShopBundle\Entity\Shop", cascade={"persist"})
+     * @ORM\JoinTable(
+     *      joinColumns={@ORM\JoinColumn(name="id_content_block", referencedColumnName="id_content_block")},
+     *      inverseJoinColumns={@ORM\JoinColumn(name="id_shop", referencedColumnName="id_shop", onDelete="CASCADE")}
+     * )
+     */
+    private Collection $shops;
+
+    public function __construct()
+    {
+        $this->shops = new ArrayCollection();
+    }
+
+    public function getId(): int { return $this->id; }
+    public function getTitle(): string { return $this->title; }
+    public function setTitle(string $title): void { $this->title = $title; }
+    public function getDescription(): string { return $this->description; }
+    public function setDescription(string $description): void { $this->description = $description; }
+    public function getEnable(): bool { return $this->enable; }
+    public function setEnable(bool $enable): void { $this->enable = $enable; }
+    public function addShop(Shop $shop): void { $this->shops[] = $shop; }
+    public function removeShop(Shop $shop): void { $this->shops->removeElement($shop); }
+    public function getShops(): Collection { return $this->shops; }
+    public function clearShops(): void { $this->shops->clear(); }
+}
+```
+
+## Feature 1: Shop association block (ContentBlockType)
+
+When the merchant creates or edits a content block, a **shop association tree** is shown so they can choose which shops the block belongs to. The field is only added when multistore is actually in use:
+
+```php
+// src/Form/ContentBlockType.php
+namespace PrestaShop\Module\DemoMultistoreForm\Form;
+
+use PrestaShopBundle\Form\Admin\Type\ShopChoiceTreeType;
+use PrestaShopBundle\Form\Admin\Type\SwitchType;
+use Symfony\Component\Form\Extension\Core\Type\TextType;
+use Symfony\Component\Form\FormBuilderInterface;
+use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\TypedRegex;
+use Symfony\Component\Validator\Constraints\Length;
+use Symfony\Component\Validator\Constraints\NotBlank;
+use PrestaShop\PrestaShop\Core\Context\ShopContext;
+
+class ContentBlockType extends AbstractType
+{
+    public function __construct(
+        private readonly ShopContext $shopContext
+    ) {
+    }
+
+    public function buildForm(FormBuilderInterface $builder, array $options): void
+    {
+        $builder
+            ->add('title', TextType::class, [
+                'label' => 'Title',
+                'help' => 'Throws error if length is > 50 or text contains <>={}',
+                'constraints' => [
+                    new TypedRegex(['type' => 'generic_name']),
+                    new Length(['max' => 50]),
+                ],
+            ])
+            ->add('description', TextType::class, [
+                'label' => 'Description',
+                'constraints' => [
+                    new TypedRegex(['type' => 'generic_name']),
+                    new Length(['max' => 100]),
+                ],
+            ])
+            ->add('enable', SwitchType::class, ['label' => 'Enable']);
+
+        if ($this->shopContext->isMultiShopUsed()) {
+            $builder->add(
+                'shop_association',
+                ShopChoiceTreeType::class,
+                [
+                    'label' => 'Shop associations',
+                    'constraints' => [
+                        new NotBlank([
+                            'message' => $this->trans(
+                                'You have to select at least one shop to associate this item with',
+                                [],
+                                'Admin.Notifications.Error'
+                            ),
+                        ]),
+                    ],
+                ]
+            );
+        }
+    }
+}
+```
+
+<Tip>
+  `ShopChoiceTreeType` renders a collapsible tree of shop groups and shops, with checkboxes. The `NotBlank` constraint on `shop_association` prevents saving a block that is not associated with at least one shop.
+</Tip>
+
+## Feature 2: Scoped grid listing (ContentBlockQueryBuilder)
+
+The grid listing automatically adjusts based on the current shop context. When "All Shops" is selected every content block is shown; when a specific shop or group is selected, only blocks associated with shops in that context appear:
+
+```php
+// src/Grid/Query/ContentBlockQueryBuilder.php
+final class ContentBlockQueryBuilder extends AbstractDoctrineQueryBuilder
+{
+    public function __construct(
+        Connection $connection,
+        string $dbPrefix,
+        private ShopContext $shopContext
+    ) {
+        parent::__construct($connection, $dbPrefix);
+    }
+
+    public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria): QueryBuilder
+    {
+        $qb = $this->getBaseQuery();
+        $qb->select('cb.id_content_block, cb.title, cb.description, cb.enable');
+
+        if (!$this->shopContext->isAllShopContext()) {
+            $qb->join('cb', $this->dbPrefix . 'content_block_shop', 'cbs', 'cbs.id_content_block = cb.id_content_block')
+                ->where('cbs.id_shop in (' . implode(', ', $this->shopContext->getAssociatedShopIds()) . ')')
+                ->groupBy('cb.id_content_block');
+        }
+
+        $qb->orderBy($searchCriteria->getOrderBy(), $searchCriteria->getOrderWay())
+            ->setFirstResult($searchCriteria->getOffset() ?? 0)
+            ->setMaxResults($searchCriteria->getLimit());
+
+        return $qb;
+    }
+
+    public function getCountQueryBuilder(SearchCriteriaInterface $searchCriteria): QueryBuilder
+    {
+        $qb = $this->getBaseQuery();
+        $qb->select('COUNT(DISTINCT cb.id_content_block)');
+        if (!$this->shopContext->isAllShopContext()) {
+            $qb->join('cb', $this->dbPrefix . 'content_block_shop', 'cbs', 'cbs.id_content_block = cb.id_content_block')
+                ->where('cbs.id_shop in (' . implode(', ', $this->shopContext->getAssociatedShopIds()) . ')');
+        }
+        return $qb;
+    }
+
+    private function getBaseQuery(): QueryBuilder
+    {
+        return $this->connection->createQueryBuilder()
+            ->from($this->dbPrefix . 'content_block', 'cb');
+    }
+}
+```
+
+The `ContentBlockGridDefinitionFactory` defines columns for `id_content_block`, `title`, `description`, a `ToggleColumn` for enable/disable, and edit/delete row actions:
+
+```php
+// src/Grid/Definition/Factory/ContentBlockGridDefinitionFactory.php
+protected function getColumns()
+{
+    return (new ColumnCollection())
+        ->add((new DataColumn('id_content_block'))
+            ->setName($this->trans('ID', [], 'Admin.Global'))
+            ->setOptions(['field' => 'id_content_block'])
+        )
+        ->add((new DataColumn('title'))
+            ->setName($this->trans('Title', [], 'Admin.Global'))
+            ->setOptions(['field' => 'title'])
+        )
+        ->add((new DataColumn('description'))
+            ->setName($this->trans('Description', [], 'Admin.Global'))
+            ->setOptions(['field' => 'description'])
+        )
+        ->add((new ToggleColumn('enable'))
+            ->setName($this->trans('Displayed', [], 'Admin.Global'))
+            ->setOptions([
+                'field' => 'enable',
+                'primary_field' => 'id_content_block',
+                'route' => 'demo_multistore_toggle_status',
+                'route_param_name' => 'contentBlockId',
+            ])
+        )
+        ->add((new ActionColumn('actions'))
+            ->setOptions([
+                'actions' => (new RowActionCollection())
+                    ->add((new LinkRowAction('edit'))
+                        ->setIcon('edit')
+                        ->setOptions([
+                            'route' => 'demo_multistore_edit',
+                            'route_param_name' => 'contentBlockId',
+                            'route_param_field' => 'id_content_block',
+                        ])
+                    )
+                    ->add((new LinkRowAction('delete'))
+                        ->setName($this->trans('Delete', [], 'Admin.Actions'))
+                        ->setIcon('delete')
+                        ->setOptions([
+                            'route' => 'demo_multistore_delete',
+                            'route_param_name' => 'contentBlockId',
+                            'route_param_field' => 'id_content_block',
+                            'confirm_message' => $this->trans('Delete selected item?', [], 'Admin.Notifications.Warning'),
+                        ])
+                    ),
+            ])
+        );
+}
+```
+
+## Feature 3: Per-shop checkboxes (ContentBlockConfigurationType)
+
+For a separate "configuration" form (global display settings like color, italic, bold) the module uses `MultistoreConfigurationType` as a parent form type. PrestaShop's `MultistoreConfigurationTypeExtension` automatically injects per-field checkboxes when the merchant is in a specific shop or group context, and a specific-settings dropdown when in "All Shops" context.
+
+The key is adding `multistore_configuration_key` to each field's options — this maps the field to a `Configuration` key and enables the multistore extension to track which shops have overridden the value:
+
+```php
+// src/Form/ContentBlockConfigurationType.php
+namespace PrestaShop\Module\DemoMultistoreForm\Form;
+
+use Symfony\Component\Form\Extension\Core\Type\ColorType;
+use PrestaShopBundle\Form\Admin\Type\CommonAbstractType;
+use PrestaShopBundle\Form\Admin\Type\MultistoreConfigurationType;
+use Symfony\Component\Form\FormBuilderInterface;
+use PrestaShopBundle\Form\Admin\Type\SwitchType;
+
+class ContentBlockConfigurationType extends CommonAbstractType
+{
+    public function buildForm(FormBuilderInterface $builder, array $options): void
+    {
+        $builder
+            ->add('color', ColorType::class, [
+                'attr' => ['class' => 'col-md-4 col-lg-2 p-1 h-25 w-50'],
+                'required' => false,
+                'label' => 'Color',
+                'multistore_configuration_key' => 'PS_DEMO_MULTISTORE_COLOR',
+            ])
+            ->add('italic', SwitchType::class, [
+                'label' => 'Italic',
+                'multistore_configuration_key' => 'PS_DEMO_MULTISTORE_ITALIC',
+            ])
+            ->add('bold', SwitchType::class, [
+                'label' => 'Bold',
+                'multistore_configuration_key' => 'PS_DEMO_MULTISTORE_BOLD',
+            ]);
+    }
+
+    /**
+     * Returning MultistoreConfigurationType as the parent causes
+     * MultistoreConfigurationTypeExtension to apply its checkboxes and dropdowns.
+     */
+    public function getParent(): string
+    {
+        return MultistoreConfigurationType::class;
+    }
+}
+```
+
+<Tip>
+  You do not need to declare the checkboxes or the "specific settings" dropdown yourself. Setting `getParent()` to `MultistoreConfigurationType::class` is all that is required — the PrestaShop form extension automatically adds the multistore controls based on the `multistore_configuration_key` option you provide per field.
+</Tip>
+
+## Feature 4: Enable/disable and delete in multistore context
+
+### Toggle (enable/disable)
+
+The `ToggleColumn` in the grid fires a JSON-returning AJAX action (`demo_multistore_toggle_status`). The controller toggles the `enable` flag unconditionally — the status change applies to all shops the block is associated with, not just the currently selected context:
+
+```php
+// src/Controller/DemoMultistoreController.php
+public function toggleStatus(
+    int $contentBlockId,
+    EntityManagerInterface $entityManager
+): Response {
+    $contentBlock = $entityManager
+        ->getRepository(ContentBlock::class)
+        ->findOneBy(['id' => $contentBlockId]);
+
+    if (empty($contentBlock)) {
+        return $this->json(['status' => false, 'message' => '...']);
+    }
+
+    $contentBlock->setEnable(!$contentBlock->getEnable());
+    $entityManager->flush();
+
+    return $this->json([
+        'status' => true,
+        'message' => $this->trans('The status has been successfully updated.', [], 'Admin.Notifications.Success'),
+    ]);
+}
+```
+
+### Context-aware delete
+
+Delete behaviour is more nuanced. In **"All Shops"** context the block and all its shop associations are removed entirely. In a **specific shop or group** context the block is only dissociated from the shops in that context; if no shops remain after the dissociation, the block entity itself is also deleted:
+
+```php
+public function delete(
+    int $contentBlockId,
+    EntityManagerInterface $entityManager,
+): Response {
+    $shopContext = $this->getShopContext();
+    $contentBlock = $entityManager->getRepository(ContentBlock::class)->find($contentBlockId);
+
+    if (!empty($contentBlock)) {
+        if ($shopContext->isAllShopContext()) {
+            $contentBlock->clearShops();
+            $entityManager->remove($contentBlock);
+        } else {
+            $shopList = $entityManager->getRepository(Shop::class)
+                ->findBy(['id' => $shopContext->getAssociatedShopIds()]);
+            foreach ($shopList as $shop) {
+                $contentBlock->removeShop($shop);
+                $entityManager->flush();
+            }
+            if (count($contentBlock->getShops()) === 0) {
+                $entityManager->remove($contentBlock);
+            }
+        }
+        $entityManager->flush();
+        // ... success flash
+    }
+
+    return $this->redirectToRoute('demo_multistore');
+}
+```
+
+<Warning>
+  Always implement context-aware deletion when your entity has shop associations. Deleting in "All Shops" context should remove the entity entirely; deleting in a single-shop context should only remove the association for that shop, preserving the entity for other associated shops.
+</Warning>
+
+## Module declaration
+
+The module declares multistore compatibility explicitly via the `$multistoreCompatibility` property:
+
+```php
+// demomultistoreform.php
+class DemoMultistoreForm extends Module
+{
+    public $multistoreCompatibility = self::MULTISTORE_COMPATIBILITY_YES;
+    // ...
+}
+```
+
+Setting this to `MULTISTORE_COMPATIBILITY_YES` tells the Back Office module listing that this module explicitly supports multistore, preventing a "not tested" warning.
+
+## Service registration
+
+```yaml
+# config/services.yml
+services:
+  _defaults:
+    public: true
+
+  PrestaShop\Module\DemoMultistoreForm\Controller\DemoMultistoreController:
+    autowire: true
+    autoconfigure: true
+
+  # Creation/edition form
+  prestashop.module.demo_multistore.form.identifiable_object.builder.content_block_form_builder:
+    class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilder'
+    factory: [ '@prestashop.core.form.builder.form_builder_factory', 'create' ]
+    arguments:
+      - 'PrestaShop\Module\DemoMultistoreForm\Form\ContentBlockType'
+      - '@prestashop.module.demo_multistore.form.identifiable_object.data_provider.content_block_form_data_provider'
+
+  prestashop.module.demo_multistore.form.identifiable_object.handler.content_block_form_handler:
+    class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandler'
+    factory: [ '@prestashop.core.form.identifiable_object.handler.form_handler_factory', 'create' ]
+    arguments:
+      - '@prestashop.module.demo_multistore.form.identifiable_object.data_handler.content_block_form_data_handler'
+
+  # Grid
+  prestashop.module.demo_multistore.grid.definition.factory.content_blocks:
+    class: 'PrestaShop\Module\DemoMultistoreForm\Grid\Definition\Factory\ContentBlockGridDefinitionFactory'
+    parent: 'prestashop.core.grid.definition.factory.abstract_grid_definition'
+
+  prestashop.module.demo_multistore.grid.query.content_block_query_builder:
+    class: 'PrestaShop\Module\DemoMultistoreForm\Grid\Query\ContentBlockQueryBuilder'
+    parent: 'prestashop.core.grid.abstract_query_builder'
+    autowire: true
+
+  prestashop.module.demo_multistore.grid.content_block_grid_factory:
+    class: 'PrestaShop\PrestaShop\Core\Grid\GridFactory'
+    arguments:
+      - '@prestashop.module.demo_multistore.grid.definition.factory.content_blocks'
+      - '@prestashop.module.demo_multistore.grid.data.factory.content_block_data_factory'
+      - '@prestashop.core.grid.filter.form_factory'
+      - '@prestashop.core.hook.dispatcher'
+
+  # Configuration form
+  prestashop.module.demo_multistore.content_block_configuration.form_handler:
+    class: 'PrestaShop\PrestaShop\Core\Form\Handler'
+    arguments:
+      - '@form.factory'
+      - '@prestashop.core.hook.dispatcher'
+      - '@prestashop.module.demo_multistore.content_block_configuration.form_provider'
+      - 'PrestaShop\Module\DemoMultistoreForm\Form\ContentBlockConfigurationType'
+      - 'ConfigurationForm'
+
+  prestashop.module.demo_multistore.form.content_block_type:
+    class: 'PrestaShop\Module\DemoMultistoreForm\Form\ContentBlockType'
+    public: true
+    autowire: true
+    autoconfigure: true
+    calls:
+      - { method: setTranslator, arguments: [ '@translator' ] }
+```

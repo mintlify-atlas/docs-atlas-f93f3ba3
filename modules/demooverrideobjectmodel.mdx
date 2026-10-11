@@ -1,0 +1,196 @@
+---
+title: "Override an ObjectModel to Add Custom Database Fields"
+sidebarTitle: "ObjectModel Override"
+description: "Understand how PrestaShop's ObjectModel override mechanism works and why Doctrine entities or form hooks are preferred over overrides in production modules."
+---
+
+The `demooverrideobjectmodel` module demonstrates PrestaShop's **class override** mechanism: placing a file in `override/classes/` that extends a core class and injecting a new field into an existing ObjectModel `$definition`. The module adds a `code` field to the `Manufacturer` ObjectModel and a matching column to `ps_manufacturer`. It exists purely as a learning reference — the README and this page both explain why you should reach for safer alternatives in any production module.
+
+<Warning>
+  **Overrides are not recommended for production modules.** Only one module can override a given core class at a time — any other module that attempts the same override will fail to install. Schema changes introduced in future PrestaShop versions can silently break your override, and the approach is fundamentally incompatible with multi-module ecosystems. Read the [alternatives section](#preferred-alternatives) before adopting this pattern.
+</Warning>
+
+## How the override mechanism works
+
+PrestaShop's autoloader checks the `override/classes/` directory before loading the core class. When a file exists there with the right class name, that file is loaded instead, giving the override class precedence. The override class must **extend the core** (`*Core`) variant of the class:
+
+```php
+// override/classes/Manufacturer.php
+declare(strict_types=1);
+
+class Manufacturer extends ManufacturerCore
+{
+    public string $code;
+
+    public function __construct(
+        ?int $id = null,
+        ?int $idLang = null
+    ) {
+        self::$definition['fields']['code'] = ['type' => self::TYPE_STRING, 'size' => 64];
+        parent::__construct($id, $idLang);
+    }
+}
+```
+
+Three things happen in this constructor:
+
+1. **`public string $code`** — declares the new property so ObjectModel can read and write it.
+2. **`self::$definition['fields']['code'] = [...]`** — injects the field metadata into the static `$definition` array that ObjectModel uses for validation and persistence. This must happen before `parent::__construct()` is called.
+3. **`parent::__construct($id, $idLang)`** — delegates to `ManufacturerCore`, which reads `$definition` to build the `SELECT` and `INSERT`/`UPDATE` queries.
+
+<Note>
+  The `$definition` property is `static`, so modifying it in `__construct()` affects all subsequent instances within the same request. This is intentional — it means the schema change applies globally once the override class is loaded.
+</Note>
+
+## Database schema change
+
+The override adds a `code` column to `ps_manufacturer`. This is handled by `Installer::installDb()` at module install time:
+
+```sql
+-- src/Install/install.sql
+ALTER TABLE _DB_PREFIX_manufacturer ADD `code` VARCHAR(64) NOT NULL DEFAULT '';
+```
+
+On uninstall the column is dropped:
+
+```sql
+-- src/Install/uninstall.sql
+ALTER TABLE _DB_PREFIX_manufacturer DROP COLUMN `code`;
+```
+
+### The Installer class
+
+`Installer` uses PrestaShop's legacy `Db` class and `Tools::file_get_contents()` to execute the SQL file, substituting `_DB_PREFIX_` and `_MYSQL_ENGINE_` placeholders:
+
+```php
+// src/Install/Installer.php
+namespace PrestaShop\Module\DemoOverrideObjectModel\Install;
+
+use Db;
+use Module;
+use Tools;
+
+class Installer
+{
+    public function install(Module $module): bool
+    {
+        if (!$this->registerHooks($module)) {
+            return false;
+        }
+        $this->installDb($module);
+        return true;
+    }
+
+    public function uninstall(Module $module): bool
+    {
+        $this->uninstallDb($module);
+        return true;
+    }
+
+    private function installDb(Module $module): void
+    {
+        $this->executeSqlFromFile($module->getLocalPath() . 'src/Install/install.sql');
+    }
+
+    private function uninstallDb(Module $module): void
+    {
+        $this->executeSqlFromFile($module->getLocalPath() . 'src/Install/uninstall.sql');
+    }
+
+    private function executeSqlFromFile(string $path): void
+    {
+        $database = Db::getInstance();
+        $sqlStatements = Tools::file_get_contents($path);
+        $sqlStatements = str_replace(
+            ['_DB_PREFIX_', '_MYSQL_ENGINE_'],
+            [_DB_PREFIX_, _MYSQL_ENGINE_],
+            $sqlStatements
+        );
+        $database->execute($sqlStatements);
+    }
+}
+```
+
+## Module entry point
+
+The main `demooverrideobjectmodel.php` simply delegates to `Installer`:
+
+```php
+// demooverrideobjectmodel.php
+class DemoOverrideObjectModel extends Module
+{
+    public function __construct()
+    {
+        $this->name = 'demooverrideobjectmodel';
+        $this->author = 'PrestaShop';
+        $this->version = '1.0.0';
+        $this->ps_versions_compliancy = ['min' => '9.0.0', 'max' => '9.99.99'];
+        parent::__construct();
+        $this->displayName = $this->trans('Demo override object model', [], 'Modules.DemmoOverrideObjectModel.Admin');
+        $this->description = $this->trans(
+            'Shows example how to override object model and add custom field to database table',
+            [], 'Modules.DemmoOverrideObjectModel.Admin'
+        );
+    }
+
+    public function install()
+    {
+        if (!parent::install()) { return false; }
+        $installer = new Installer();
+        return $installer->install($this);
+    }
+
+    public function uninstall()
+    {
+        if (!parent::uninstall()) { return false; }
+        $installer = new Installer();
+        return $installer->uninstall($this);
+    }
+}
+```
+
+## Installation
+
+<Steps>
+  <Step title="Clone the module">
+    ```bash
+    cd modules/
+    cp -r example-modules/demooverrideobjectmodel demooverrideobjectmodel
+    ```
+  </Step>
+
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd demooverrideobjectmodel
+    composer install
+    ```
+  </Step>
+
+  <Step title="Install the module">
+    From the Back Office Module Manager, or via CLI:
+
+    ```bash
+    php bin/console prestashop:module install demooverrideobjectmodel
+    ```
+
+    The installer runs `install.sql` to add the `code` column and PrestaShop merges `override/classes/Manufacturer.php` into its compiled override cache.
+  </Step>
+</Steps>
+
+<Warning>
+  After installing or uninstalling any module that contains overrides, PrestaShop regenerates the override cache. If another module has already overridden `Manufacturer`, installation will fail with a conflict error. There is no safe way to merge two overrides of the same class.
+</Warning>
+
+## Preferred alternatives
+
+For production modules that need to store extra data alongside a core entity, use one of these approaches instead:
+
+| Approach | Best for | Module reference |
+|---|---|---|
+| **Doctrine entities in a dedicated table** | Any extra data that belongs to your module, not to PrestaShop's core schema | [demodoctrine](/modules/demodoctrine) |
+| **Form data provider hooks** (`actionProductFormDataProviderData` etc.) | Reading and writing extra fields in an existing BO form without changing the core table | `demoformdataproviders` |
+| **Identifiable object hooks** (`actionAfterCreate/Update/Delete[ObjectName]FormHandler`) | Reacting to core object saves and persisting your data in a side table | `demoextendsymfonyform1` |
+
+<Tip>
+  The Doctrine entity approach (see [demodoctrine](/modules/demodoctrine)) is the most flexible: your data lives in its own table, your module cannot conflict with other modules, and your schema does not depend on PrestaShop's core tables remaining unchanged.
+</Tip>

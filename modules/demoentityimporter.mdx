@@ -1,0 +1,329 @@
+---
+title: "Import Custom Entities from CSV Using PrestaShop's Import Framework"
+sidebarTitle: "Entity Importer"
+description: "Implement a custom CSV importer for a proprietary entity by integrating with PrestaShop's import framework and a dedicated Importer service class."
+---
+
+The `demoentityimporter` module shows how a PrestaShop 9.3+ module plugs its own importer into the core import engine (`Advanced Parameters > Import`). Each CSV row is validated and then persisted as a `DemoNote` Doctrine entity. The module demonstrates every layer required: entity definition, two-phase importer class, autoconfigured service registration, and a sample CSV file.
+
+<Note>
+  This module requires PrestaShop **9.3.0 or newer**. The import engine with the `EntityImporterInterface` extension point was introduced in that release.
+</Note>
+
+## How it works
+
+The core import engine maintains an `EntityImporterRegistry`. Any service that implements `EntityImporterInterface` and is tagged `core.import.entity_importer` is automatically collected into that registry. With `autoconfigure: true`, the tag is applied automatically — no manual configuration is needed.
+
+The overall flow is:
+
+1. The merchant selects **"Demo notes"** from the entity dropdown on the Import page.
+2. The core calls `DemoNoteImporter::getFields()` to render the column-mapping UI.
+3. On import, the engine runs two sequential phases:
+   - **`validation`** — every row is checked (non-empty, max 255 chars). Rows that fail are flagged as skipped.
+   - **`database`** — each non-skipped row is persisted as a `DemoNote` (create, or update when the `id` column matches an existing record).
+
+## Installation
+
+<Steps>
+  <Step title="Clone the module">
+    ```bash
+    cd modules/
+    cp -r example-modules/demoentityimporter demoentityimporter
+    ```
+  </Step>
+
+  <Step title="Generate the autoload map">
+    The module has no Composer dependencies but uses PSR-4 autoloading:
+
+    ```bash
+    cd demoentityimporter
+    composer dumpautoload
+    ```
+  </Step>
+
+  <Step title="Install the module">
+    From the Back Office Module Manager, or via CLI:
+
+    ```bash
+    php bin/console prestashop:module install demoentityimporter
+    ```
+
+    Installation creates the `ps_demo_note` table.
+  </Step>
+
+  <Step title="Verify the importer is registered">
+    ```bash
+    php bin/console debug:container --tag=core.import.entity_importer
+    ```
+
+    `DemoNoteImporter` should appear alongside the built-in core importers.
+  </Step>
+</Steps>
+
+## The DemoNote entity
+
+`DemoNote` is a minimal Doctrine entity with three fields. Because it lives in `src/Entity/`, the PrestaShop core maps it automatically for active modules — no extra Doctrine configuration file is needed:
+
+```php
+// src/Entity/DemoNote.php
+namespace PrestaShop\Module\DemoEntityImporter\Entity;
+
+use DateTime;
+use Doctrine\ORM\Mapping as ORM;
+
+/**
+ * @ORM\Table()
+ * @ORM\Entity()
+ */
+class DemoNote
+{
+    /**
+     * @var int
+     *
+     * @ORM\Id
+     * @ORM\Column(name="id_demo_note", type="integer")
+     * @ORM\GeneratedValue(strategy="AUTO")
+     */
+    private $id;
+
+    /**
+     * @var string
+     *
+     * @ORM\Column(name="note", type="string", length=255)
+     */
+    private $note;
+
+    /**
+     * @var DateTime
+     *
+     * @ORM\Column(name="date_add", type="datetime")
+     */
+    private $dateAdd;
+
+    public function __construct(string $note)
+    {
+        $this->note = $note;
+        $this->dateAdd = new DateTime();
+    }
+
+    public function getId(): ?int { return $this->id; }
+    public function getNote(): string { return $this->note; }
+    public function setNote(string $note): self { $this->note = $note; return $this; }
+    public function getDateAdd(): DateTime { return $this->dateAdd; }
+}
+```
+
+The backing table is created directly in the module's `install()` method using the legacy `Db` class (no separate installer class):
+
+```php
+// demoentityimporter.php
+private function installDatabase(): bool
+{
+    return Db::getInstance()->execute('
+        CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'demo_note` (
+            `id_demo_note` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `note` VARCHAR(255) NOT NULL,
+            `date_add` DATETIME NOT NULL,
+            PRIMARY KEY (`id_demo_note`)
+        ) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8mb4;
+    ');
+}
+```
+
+## The DemoNoteImporter class
+
+`DemoNoteImporter` extends `AbstractEntityImporter`, which provides:
+
+- A cursor-resumable batch loop (`iterateBatch`)
+- Phase-id validation (`assertKnownPhase`)
+- Default unit counting
+
+```php
+// src/Importer/DemoNoteImporter.php
+namespace PrestaShop\Module\DemoEntityImporter\Importer;
+
+use Doctrine\ORM\EntityManagerInterface;
+use PrestaShop\Module\DemoEntityImporter\Entity\DemoNote;
+use PrestaShop\PrestaShop\Core\Import\Engine\EntityImporter\AbstractEntityImporter;
+use PrestaShop\PrestaShop\Core\Import\Engine\EntityImporter\RowMapper;
+use PrestaShop\PrestaShop\Core\Import\Engine\ImportJobContext;
+use PrestaShop\PrestaShop\Core\Import\Engine\ImportMessage;
+use PrestaShop\PrestaShop\Core\Import\Engine\ImportPhaseDefinition;
+use PrestaShop\PrestaShop\Core\Import\Engine\PhaseBatchResult;
+use PrestaShop\PrestaShop\Core\Import\EntityField\EntityField;
+use PrestaShop\PrestaShop\Core\Import\EntityField\EntityFieldCollection;
+use PrestaShop\PrestaShop\Core\Import\EntityField\EntityFieldCollectionInterface;
+use PrestaShop\PrestaShop\Core\Import\File\ResumableFileReaderInterface;
+
+class DemoNoteImporter extends AbstractEntityImporter
+{
+    public const ENTITY_TYPE = 'demo_note';
+    protected const NOTE_MAX_LENGTH = 255;
+
+    public function __construct(
+        ResumableFileReaderInterface $fileReader,
+        RowMapper $rowMapper,
+        protected readonly EntityManagerInterface $entityManager,
+    ) {
+        parent::__construct($fileReader, $rowMapper);
+    }
+
+    public function getEntityType(): string { return self::ENTITY_TYPE; }
+    public function getLabel(): string { return 'Demo notes'; }
+
+    public function getFields(): EntityFieldCollectionInterface
+    {
+        return EntityFieldCollection::createFromArray([
+            new EntityField('id', 'ID'),
+            new EntityField('note', 'Note'),
+        ]);
+    }
+
+    public function getPhases(): array
+    {
+        return [
+            new ImportPhaseDefinition(ImportPhaseDefinition::PHASE_VALIDATION, 'Validating notes', true),
+            new ImportPhaseDefinition(ImportPhaseDefinition::PHASE_DATABASE, 'Importing notes'),
+        ];
+    }
+
+    public function processPhaseBatch(
+        string $phaseId,
+        ImportJobContext $context,
+        int $limit
+    ): PhaseBatchResult {
+        $this->assertKnownPhase($phaseId);
+
+        if (ImportPhaseDefinition::PHASE_VALIDATION === $phaseId) {
+            return $this->iterateBatch($context, $limit, function (array $row, int $rowIndex): array {
+                $messages = [];
+                $note = $row['note'] ?? '';
+                if ('' === $note) {
+                    $messages[] = $this->message(
+                        ImportMessage::SEVERITY_ERROR,
+                        ImportPhaseDefinition::PHASE_VALIDATION,
+                        'The note text is required.',
+                        $rowIndex,
+                        'note'
+                    );
+                } elseif (mb_strlen($note) > self::NOTE_MAX_LENGTH) {
+                    $messages[] = $this->message(
+                        ImportMessage::SEVERITY_ERROR,
+                        ImportPhaseDefinition::PHASE_VALIDATION,
+                        sprintf('The note exceeds %d characters.', self::NOTE_MAX_LENGTH),
+                        $rowIndex,
+                        'note'
+                    );
+                }
+                return ['messages' => $messages, 'skipped' => $this->containsError($messages)];
+            });
+        }
+
+        return $this->iterateBatch($context, $limit, function (array $row, int $rowIndex) use ($context): array {
+            if ($context->isRowSkipped($rowIndex)) {
+                return ['messages' => [], 'skipped' => false];
+            }
+            try {
+                $this->importRow($row);
+            } catch (\Throwable $e) {
+                return [
+                    'messages' => [$this->message(
+                        ImportMessage::SEVERITY_ERROR,
+                        ImportPhaseDefinition::PHASE_DATABASE,
+                        sprintf('The note could not be saved: %s', $e->getMessage()),
+                        $rowIndex
+                    )],
+                    'skipped' => true,
+                ];
+            }
+            return ['messages' => [], 'skipped' => false];
+        });
+    }
+}
+```
+
+### The importRow() method
+
+`importRow()` implements upsert logic: if the `id` column contains a valid integer that matches an existing `DemoNote`, the record is updated; otherwise a new entity is created and persisted:
+
+```php
+protected function importRow(array $row): void
+{
+    $note = null;
+    $id = $row['id'] ?? '';
+    if (ctype_digit($id)) {
+        $note = $this->entityManager->find(DemoNote::class, (int) $id);
+    }
+
+    if (null !== $note) {
+        $note->setNote($row['note']);
+    } else {
+        $note = new DemoNote($row['note']);
+        $this->entityManager->persist($note);
+    }
+
+    $this->entityManager->flush();
+}
+```
+
+<Tip>
+  Calling `flush()` inside the loop (once per row) trades throughput for safety: a single bad row only aborts that row's flush, not the entire batch. For high-volume imports you may want to batch flushes and call `clear()` to free the entity manager's identity map.
+</Tip>
+
+### ImportMessage conventions
+
+Two important conventions used when building error messages:
+
+- **`ImportMessage` carries a list of row indexes**, not a single row number. The engine coalesces messages equal on every field except rows, so one report line can name every row it applies to. A per-row message therefore passes a one-element array, e.g. `[$rowIndex]`.
+- **The `$field` argument** names the column the merchant should fix. A failure that does not belong to a specific column (e.g. a caught exception in the database phase) should pass `null`.
+
+```php
+protected function message(
+    string $severity,
+    string $phase,
+    string $text,
+    int $rowIndex,
+    ?string $field = null
+): ImportMessage {
+    return new ImportMessage($severity, $phase, $text, [$rowIndex], $field);
+}
+```
+
+## Sample CSV file
+
+The module ships a minimal sample file. The semicolon-delimited format matches the default PrestaShop import setting. An **empty `id` column** means "create a new record"; providing an existing `id` triggers an update.
+
+```csv
+id;note
+;First imported note
+;Second imported note
+```
+
+<Note>
+  Upload this file via **Advanced Parameters → Import**, select **"Demo notes"** from the entity dropdown, map the `id` and `note` columns, and click **Import**. The engine runs the validation phase first (pausing to report any errors), then the database phase.
+</Note>
+
+## Service registration
+
+`DemoNoteImporter` is registered with both `autowire: true` and `autoconfigure: true`. The `autoconfigure` flag is what causes the core to apply the `core.import.entity_importer` tag automatically — no manual tag entry is needed in `services.yml`:
+
+```yaml
+# config/services.yml
+services:
+  _defaults:
+    public: true
+    autowire: true
+    # autoconfigure causes the core to apply the core.import.entity_importer
+    # tag automatically for services implementing EntityImporterInterface
+    autoconfigure: true
+
+  PrestaShop\Module\DemoEntityImporter\Importer\DemoNoteImporter: ~
+```
+
+After the module is installed and the container cache is rebuilt, verify registration:
+
+```bash
+php bin/console debug:container --tag=core.import.entity_importer
+```
+
+`PrestaShop\Module\DemoEntityImporter\Importer\DemoNoteImporter` should appear in the output alongside `ProductImporter`, `CustomerImporter`, and the other built-in importers.

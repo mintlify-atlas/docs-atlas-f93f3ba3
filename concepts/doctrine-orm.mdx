@@ -1,0 +1,518 @@
+---
+title: "Managing Custom Data with Doctrine ORM in PrestaShop"
+sidebarTitle: "Doctrine ORM"
+description: "Use Doctrine ORM to define custom entities, manage database schema installation, and query data without touching PrestaShop's core tables."
+---
+
+PrestaShop has historically used its own `ObjectModel` base class for database persistence. While `ObjectModel` still works, Doctrine ORM offers a more robust alternative for modules that need custom data storage: strong typing, the repository pattern, lazy-loaded associations, lifecycle callbacks, and compatibility with the wider Symfony ecosystem. The `demodoctrine` example module demonstrates the complete stack—from entity definition to DI wiring—using a multilingual quotes data model.
+
+## Why Doctrine ORM Over ObjectModel
+
+<CardGroup cols={2}>
+  <Card title="Type Safety" icon="shield-check">
+    Entity classes are plain PHP objects with typed properties. Doctrine maps them to columns using annotations or attributes rather than string-keyed arrays, so IDEs and static analyzers can catch field-name typos at development time.
+  </Card>
+  <Card title="Repository Pattern" icon="database">
+    Business query logic lives in dedicated `EntityRepository` subclasses rather than in controllers or hook methods. Repositories are injectable services, making them easy to test and reuse.
+  </Card>
+  <Card title="No Core Table Modification" icon="lock">
+    Your entities map to their own tables. You never alter PrestaShop's core schema, which makes your module forward-compatible with core upgrades.
+  </Card>
+  <Card title="Associations" icon="link">
+    `@ORM\OneToMany`, `@ORM\ManyToOne`, and other relation annotations let Doctrine handle JOINs and cascading operations declaratively, replacing hand-written SQL joins.
+  </Card>
+</CardGroup>
+
+## Entity Class Anatomy
+
+Doctrine entities are plain PHP classes annotated with `@ORM\*` docblock annotations (or PHP 8 attributes). The `demodoctrine` module uses a two-table multilingual design: `Quote` holds the author and timestamps, while `QuoteLang` holds the language-specific text.
+
+### Quote Entity
+
+```php
+declare(strict_types=1);
+
+namespace Module\DemoDoctrine\Entity;
+
+use DateTime;
+use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\ORM\Mapping as ORM;
+
+/**
+ * @ORM\Table()
+ * @ORM\Entity(repositoryClass="Module\DemoDoctrine\Repository\QuoteRepository")
+ * @ORM\HasLifecycleCallbacks
+ */
+class Quote
+{
+    /**
+     * @var int
+     *
+     * @ORM\Id
+     * @ORM\Column(name="id_quote", type="integer")
+     * @ORM\GeneratedValue(strategy="AUTO")
+     */
+    private $id;
+
+    /**
+     * @var string
+     *
+     * @ORM\Column(name="author", type="string", length=255)
+     */
+    private $author;
+
+    /**
+     * @ORM\OneToMany(targetEntity="Module\DemoDoctrine\Entity\QuoteLang", cascade={"persist", "remove"}, mappedBy="quote")
+     */
+    private $quoteLangs;
+
+    /**
+     * @var DateTime
+     *
+     * @ORM\Column(name="date_add", type="datetime")
+     */
+    private $dateAdd;
+
+    /**
+     * @var DateTime
+     *
+     * @ORM\Column(name="date_upd", type="datetime")
+     */
+    private $dateUpd;
+
+    public function __construct()
+    {
+        $this->quoteLangs = new ArrayCollection();
+    }
+
+    /**
+     * Now we tell doctrine that before we persist or update we call the updatedTimestamps() function.
+     *
+     * @ORM\PrePersist
+     * @ORM\PreUpdate
+     */
+    public function updatedTimestamps()
+    {
+        $this->setDateUpd(new DateTime());
+
+        if ($this->getDateAdd() == null) {
+            $this->setDateAdd(new DateTime());
+        }
+    }
+
+    public function getId()
+    {
+        return $this->id;
+    }
+
+    public function getAuthor()
+    {
+        return $this->author;
+    }
+
+    public function setAuthor(string $author)
+    {
+        $this->author = $author;
+
+        return $this;
+    }
+
+    public function getQuoteLangs()
+    {
+        return $this->quoteLangs;
+    }
+
+    public function addQuoteLang(QuoteLang $quoteLang)
+    {
+        $quoteLang->setQuote($this);
+        $this->quoteLangs->add($quoteLang);
+
+        return $this;
+    }
+
+    public function getQuoteLangByLangId(int $langId)
+    {
+        foreach ($this->quoteLangs as $quoteLang) {
+            if ($langId === $quoteLang->getLang()->getId()) {
+                return $quoteLang;
+            }
+        }
+
+        return null;
+    }
+}
+```
+
+Key annotations to understand:
+
+| Annotation | Effect |
+|---|---|
+| `@ORM\Entity(repositoryClass=...)` | Tells Doctrine which repository class manages this entity |
+| `@ORM\HasLifecycleCallbacks` | Required to activate `@ORM\PrePersist` / `@ORM\PreUpdate` methods |
+| `@ORM\Id` + `@ORM\GeneratedValue` | Marks the primary key with auto-increment |
+| `@ORM\OneToMany(cascade={"persist","remove"})` | Cascades saves and deletes to the `QuoteLang` collection |
+
+### QuoteLang Entity (Multilingual Relation)
+
+`QuoteLang` uses a composite primary key (`id_quote` + `id_lang`) and joins to PrestaShop's own `Lang` entity from `PrestaShopBundle`:
+
+```php
+declare(strict_types=1);
+
+namespace Module\DemoDoctrine\Entity;
+
+use Doctrine\ORM\Mapping as ORM;
+use PrestaShopBundle\Entity\Lang;
+
+/**
+ * @ORM\Table()
+ * @ORM\Entity()
+ */
+class QuoteLang
+{
+    /**
+     * @var Quote
+     * @ORM\Id
+     * @ORM\ManyToOne(targetEntity="Module\DemoDoctrine\Entity\Quote", inversedBy="quoteLangs")
+     * @ORM\JoinColumn(name="id_quote", referencedColumnName="id_quote", nullable=false)
+     */
+    private $quote;
+
+    /**
+     * @var Lang
+     * @ORM\Id
+     * @ORM\ManyToOne(targetEntity="PrestaShopBundle\Entity\Lang")
+     * @ORM\JoinColumn(name="id_lang", referencedColumnName="id_lang", nullable=false, onDelete="CASCADE")
+     */
+    private $lang;
+
+    /**
+     * @var string
+     * @ORM\Column(name="content", type="string", nullable=true)
+     */
+    private $content;
+
+    public function getQuote()
+    {
+        return $this->quote;
+    }
+
+    public function setQuote(Quote $quote)
+    {
+        $this->quote = $quote;
+
+        return $this;
+    }
+
+    public function getLang()
+    {
+        return $this->lang;
+    }
+
+    public function setLang(Lang $lang)
+    {
+        $this->lang = $lang;
+
+        return $this;
+    }
+
+    public function getContent()
+    {
+        return $this->content;
+    }
+
+    public function setContent(?string $content)
+    {
+        $this->content = $content;
+
+        return $this;
+    }
+}
+```
+
+<Note>
+`PrestaShopBundle\Entity\Lang` is PrestaShop's own Doctrine-mapped entity for the `ps_lang` table. You can join to it freely—Doctrine resolves the mapping from its compiled metadata cache. The `onDelete="CASCADE"` ensures that if a language is removed from the shop, the related translations are automatically deleted.
+</Note>
+
+## The Repository Pattern
+
+Repositories extend `EntityRepository` and contain all read-query logic for the entity. This keeps controllers and hook methods free of raw Doctrine query builder calls.
+
+```php
+declare(strict_types=1);
+
+namespace Module\DemoDoctrine\Repository;
+
+use Doctrine\ORM\EntityRepository;
+use Doctrine\ORM\QueryBuilder;
+
+class QuoteRepository extends EntityRepository
+{
+    /**
+     * Since RAND() is not available by default in Doctrine and we haven't an extension that
+     * adds it we perform the random fetch and sorting programmatically in PHP.
+     *
+     * @param int $langId
+     * @param int $limit
+     *
+     * @return array
+     */
+    public function getRandom($langId = 0, $limit = 0)
+    {
+        /** @var QueryBuilder $qb */
+        $qb = $this->createQueryBuilder('q')
+            ->addSelect('q')
+            ->addSelect('ql')
+            ->leftJoin('q.quoteLangs', 'ql')
+        ;
+
+        if (0 !== $langId) {
+            $qb
+                ->andWhere('ql.lang = :langId')
+                ->setParameter('langId', $langId)
+            ;
+        }
+
+        $ids = $this->getAllIds();
+        shuffle($ids);
+        if ($limit > 0) {
+            $ids = array_slice($ids, 0, $limit);
+        }
+        $qb
+            ->andWhere('q.id in (:ids)')
+            ->setParameter('ids', $ids)
+        ;
+
+        $quotes = $qb->getQuery()->getResult();
+        uasort($quotes, function ($a, $b) use ($ids) {
+            return array_search($a->getId(), $ids) - array_search($b->getId(), $ids);
+        });
+
+        return $quotes;
+    }
+
+    public function getAllIds()
+    {
+        /** @var QueryBuilder $qb */
+        $qb = $this
+            ->createQueryBuilder('q')
+            ->select('q.id')
+        ;
+
+        $quotes = $qb->getQuery()->getScalarResult();
+
+        return array_map(function ($quote) {
+            return $quote['id'];
+        }, $quotes);
+    }
+}
+```
+
+<Tip>
+`createQueryBuilder()` (inherited from `EntityRepository`) returns a builder scoped to the current entity. The string alias (`'q'` here) is used throughout the DQL query to reference the entity's fields and relations. Always prefer DQL or the QueryBuilder API over raw SQL in repositories—Doctrine can then apply caching, hydration, and second-level cache transparently.
+</Tip>
+
+## Database Installer Pattern
+
+Doctrine can generate schema from mappings using `doctrine:schema:create`, but this CLI command is not available during a module's `install()` phase inside PrestaShop. Instead, the recommended pattern is an explicit SQL file approach via a `QuoteInstaller` service.
+
+### The Installer Class
+
+```php
+declare(strict_types=1);
+
+namespace Module\DemoDoctrine\Database;
+
+use Doctrine\DBAL\Connection;
+use Doctrine\DBAL\Exception as DBALException;
+
+/**
+ * We cannot use Doctrine entities on install because the mapping is not available yet
+ * but we can still use Doctrine connection to perform DQL or SQL queries.
+ */
+class QuoteInstaller
+{
+    public function __construct(
+        private readonly Connection $connection,
+        private readonly string $dbPrefix
+    ) {
+    }
+
+    public function createTables(): array
+    {
+        $errors = [];
+        $this->dropTables();
+        $sqlInstallFile = __DIR__ . '/../../Resources/data/install.sql';
+        $sqlQueries = preg_split('/\r\n|\r|\n/', file_get_contents($sqlInstallFile));
+        $sqlQueries = str_replace('PREFIX_', $this->dbPrefix, $sqlQueries);
+
+        foreach ($sqlQueries as $query) {
+            if (empty($query)) {
+                continue;
+            }
+
+            try {
+                $this->connection->executeQuery($query);
+            } catch (DBALException $e) {
+                $errors[] = [
+                    'key' => $e->getMessage(),
+                    'parameters' => [],
+                    'domain' => 'Admin.Modules.Notification',
+                ];
+            }
+        }
+
+        return $errors;
+    }
+
+    public function dropTables(): array
+    {
+        $errors = [];
+        $tableNames = [
+            'quote',
+            'quote_lang',
+        ];
+        foreach ($tableNames as $tableName) {
+            $sql = 'DROP TABLE IF EXISTS ' . $this->dbPrefix . $tableName;
+            try {
+                $this->connection->executeQuery($sql);
+            } catch (DBALException $e) {
+                $errors[] = [
+                    'key' => $e->getMessage(),
+                    'parameters' => [],
+                    'domain' => 'Admin.Modules.Notification',
+                ];
+            }
+        }
+
+        return $errors;
+    }
+}
+```
+
+### The SQL File
+
+The SQL file uses `PREFIX_` as a placeholder that the installer replaces at runtime with the shop's actual table prefix (e.g. `ps_`):
+
+```sql
+CREATE TABLE IF NOT EXISTS `PREFIX_quote` (id_quote INT AUTO_INCREMENT NOT NULL, author VARCHAR(255) NOT NULL, date_add DATETIME NOT NULL, date_upd DATETIME NOT NULL, PRIMARY KEY(id_quote)) DEFAULT CHARACTER SET utf8 COLLATE utf8_unicode_ci ENGINE = InnoDB
+CREATE TABLE IF NOT EXISTS `PREFIX_quote_lang` (id_quote INT NOT NULL, id_lang INT NOT NULL, content LONGTEXT NULL, INDEX IDX_4D76F37E85F48AC4 (id_quote), INDEX IDX_4D76F37EBA299860 (id_lang), PRIMARY KEY(id_quote, id_lang)) DEFAULT CHARACTER SET utf8 COLLATE utf8_unicode_ci ENGINE = InnoDB
+```
+
+<Note>
+One SQL statement per line, no semicolons. The installer splits on newlines and executes each statement individually via the DBAL connection. Semicolons cause errors when passed to `executeQuery()`.
+</Note>
+
+### Calling the Installer from the Module
+
+The module's `install()` delegates to `QuoteInstaller`, which it retrieves from the container with a fallback for the install phase:
+
+```php
+public function install()
+{
+    return $this->installTables() && parent::install() && $this->registerHook('displayHome');
+}
+
+private function installTables(): bool
+{
+    /** @var QuoteInstaller $installer */
+    $installer = $this->getInstaller();
+    $errors = $installer->createTables();
+
+    return empty($errors);
+}
+
+private function getInstaller(): QuoteInstaller
+{
+    try {
+        $installer = $this->get(QuoteInstaller::class);
+    } catch (Exception) {
+        // Catch exception in case container is not available, or service is not available
+        $installer = null;
+    }
+
+    // During install process the module's service is not available yet, so we build it manually
+    if (!$installer) {
+        $installer = new QuoteInstaller(
+            $this->get('doctrine.dbal.default_connection'),
+            $this->getContainer()->getParameter('database_prefix')
+        );
+    }
+
+    return $installer;
+}
+```
+
+<Warning>
+During the very first `install()` call, the Symfony container has not yet compiled your module's services because the module was not active when the container was built. The `try/catch` pattern above handles this gracefully by constructing the installer manually with the raw DBAL connection.
+</Warning>
+
+## Registering Entities and Repositories in services.yml
+
+The DI wiring has two parts: the **common.yml** file wires the low-level repository factory and installer, while **services.yml** layers in the form, grid, and handler services.
+
+### config/common.yml
+
+```yaml
+services:
+    Module\DemoDoctrine\Repository\QuoteRepository:
+        public: true
+        factory: ['@doctrine.orm.default_entity_manager', getRepository]
+        arguments:
+            - Module\DemoDoctrine\Entity\Quote
+
+    Module\DemoDoctrine\Database\QuoteInstaller:
+        public: true
+        arguments:
+            - '@doctrine.dbal.default_connection'
+            - '%database_prefix%'
+```
+
+The repository is created via the `doctrine.orm.default_entity_manager` factory rather than being instantiated directly. This is the canonical pattern—it ensures Doctrine's metadata, identity map, and change-tracking all work correctly for your entity.
+
+### config/services.yml (excerpt)
+
+```yaml
+imports:
+    - { resource: ./common.yml }
+
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    Module\DemoDoctrine\Controller\Admin\QuotesController: ~
+
+    Module\DemoDoctrine\Form\QuoteType:
+        parent: 'form.type.translatable.aware'
+        arguments:
+            - '@=service("prestashop.adapter.multistore_feature").isUsed()'
+        tags:
+            - { name: form.type }
+
+    Module\DemoDoctrine\Form\QuoteFormDataProvider: ~
+
+    prestashop.module.demodoctrine.form.identifiable_object.builder.quote_form_builder:
+        class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilder'
+        factory: [ '@prestashop.core.form.builder.form_builder_factory', 'create' ]
+        arguments:
+            - 'Module\DemoDoctrine\Form\QuoteType'
+            - '@Module\DemoDoctrine\Form\QuoteFormDataProvider'
+
+    Module\DemoDoctrine\Form\QuoteFormDataHandler: ~
+```
+
+<Note>
+Services that use `autowire: true` have their constructor dependencies resolved automatically from type hints. The `_defaults` block applies `autowire` and `autoconfigure` to all services in the file, reducing boilerplate. Services that need non-type-hintable arguments (like string parameters or factory-created objects) still require explicit `arguments:` entries.
+</Note>
+
+## install.sql vs Doctrine Migrations
+
+<Tabs>
+  <Tab title="install.sql (Recommended for Modules)">
+    The `install.sql` approach is the recommended pattern for PrestaShop modules. The SQL file is checked into version control, the installer reads and executes it during `install()`, and upgrades are handled via separate upgrade PHP files in an `upgrade/` directory. There is no migration CLI to run, and shop administrators do not need CLI access.
+  </Tab>
+  <Tab title="Doctrine Migrations">
+    Doctrine Migrations (`doctrine/migrations`) generates version-stamped migration files and tracks which migrations have been applied. While powerful for standalone Symfony apps, this approach requires CLI access and does not integrate cleanly with PrestaShop's module upgrade mechanism. It is generally **not recommended** for distributable modules.
+  </Tab>
+</Tabs>

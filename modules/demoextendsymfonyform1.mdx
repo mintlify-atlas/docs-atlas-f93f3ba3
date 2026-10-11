@@ -1,0 +1,347 @@
+---
+title: "Extend the Customer Form with Identifiable Object Hooks"
+sidebarTitle: "Extend Customer Form"
+description: "Add a custom yes/no field to the Customers listing and edit form using identifiable object hooks and an ObjectModel entity for persistence."
+---
+
+The `demoextendsymfonyform1` module is a reference implementation showing how to add a custom field to both the **Customers listing grid** and the **Customer add/edit form** in PrestaShop 9's Back Office. It demonstrates the full identifiable object hook pattern: modifying the form builder, reading persisted data on load, and writing it back after create or update. Persistence is handled by a custom `ObjectModel` entity backed by a dedicated database table — the simplest storage approach available. If you prefer Doctrine ORM for persistence, see [demoextendsymfonyform2](/modules/demoextendsymfonyform2); for a CQRS-layered approach over the same feature, see [demoextendsymfonyform3](/modules/demoextendsymfonyform3).
+
+## What the module adds
+
+- A **toggle column** (`is_allowed_for_review`) in the **Sell → Customers** grid, including a filter and sortable header.
+- A **SwitchType field** ("Allow reviews") in the Customer add/edit form, pre-populated from the database.
+- A `Reviewer` ObjectModel entity that stores the per-customer boolean in the `demoextendsymfonyform_reviewer` table.
+- A `CustomerReviewController` that handles the inline toggle AJAX action from the grid column.
+
+## Installation
+
+<Steps>
+  <Step title="Place the module">
+    Download or clone the repository into the `modules/` directory of your PrestaShop installation. Confirm the directory is named `demoextendsymfonyform1` — the directory name must match the main PHP file name.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/demoextendsymfonyform1
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    Either enable it from **Back Office → Module Manager**, or run:
+    ```bash
+    php ./bin/console prestashop:module install demoextendsymfonyform1
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  PrestaShop 9.0.0 or later is required. The `install()` method creates the `demoextendsymfonyform_reviewer` table and registers all hooks automatically.
+</Note>
+
+## Hook registration
+
+The module registers five hooks in `install()`:
+
+```php
+$this->registerHook('actionCustomerGridDefinitionModifier') &&
+$this->registerHook('actionCustomerGridQueryBuilderModifier') &&
+$this->registerHook('actionCustomerFormBuilderModifier') &&
+$this->registerHook('actionAfterCreateCustomerFormHandler') &&
+$this->registerHook('actionAfterUpdateCustomerFormHandler') &&
+$this->installTables();
+```
+
+Hook names follow two conventions:
+- **Grid hooks**: `action{grid_id}GridDefinitionModifier` / `action{grid_id}GridQueryBuilderModifier`
+- **Form hooks**: `action{block_prefix}FormBuilderModifier` / `actionAfterCreate{block_prefix}FormHandler` / `actionAfterUpdate{block_prefix}FormHandler`
+
+The `block_prefix` is derived from the Symfony form type name (e.g. `CustomerType` → `customer`).
+
+## Adding a column to the grid
+
+`hookActionCustomerGridDefinitionModifier` receives the `GridDefinitionInterface` and appends a `ToggleColumn` after the existing `optin` column. It also registers a `YesAndNoChoiceType` filter so the column is filterable.
+
+```php
+public function hookActionCustomerGridDefinitionModifier(array $params)
+{
+    /** @var GridDefinitionInterface $definition */
+    $definition = $params['definition'];
+
+    $definition
+        ->getColumns()
+        ->addAfter(
+            'optin',
+            (new ToggleColumn('is_allowed_for_review'))
+                ->setName($this->trans('Allowed for review', [], 'Modules.DemoHowToExtendSymfonyForm.Admin'))
+                ->setOptions([
+                    'field' => 'is_allowed_for_review',
+                    'primary_field' => 'id_customer',
+                    'route' => 'ps_demoextendsymfonyform_toggle_is_allowed_for_review',
+                    'route_param_name' => 'customerId',
+                ])
+        );
+
+    $definition->getFilters()->add(
+        (new Filter('is_allowed_for_review', YesAndNoChoiceType::class))
+            ->setAssociatedColumn('is_allowed_for_review')
+    );
+}
+```
+
+The `route` option points to the `CustomerReviewController::toggleIsAllowedForReviewAction` controller action, which is what the grid calls when the toggle is clicked.
+
+## Injecting data into the grid query
+
+`hookActionCustomerGridQueryBuilderModifier` modifies the Doctrine DBAL `QueryBuilder` to `LEFT JOIN` the reviewer table and expose the `is_allowed_for_review` column for display, sorting, and filtering:
+
+```php
+public function hookActionCustomerGridQueryBuilderModifier(array $params)
+{
+    /** @var QueryBuilder $searchQueryBuilder */
+    $searchQueryBuilder = $params['search_query_builder'];
+
+    /** @var CustomerFilters $searchCriteria */
+    $searchCriteria = $params['search_criteria'];
+
+    $searchQueryBuilder->addSelect(
+        'IF(dcur.`is_allowed_for_review` IS NULL,0,dcur.`is_allowed_for_review`) AS `is_allowed_for_review`'
+    );
+
+    $searchQueryBuilder->leftJoin(
+        'c',
+        '`' . pSQL(_DB_PREFIX_) . 'demoextendsymfonyform_reviewer`',
+        'dcur',
+        'dcur.`id_customer` = c.`id_customer`'
+    );
+
+    if ('is_allowed_for_review' === $searchCriteria->getOrderBy()) {
+        $searchQueryBuilder->orderBy('dcur.`is_allowed_for_review`', $searchCriteria->getOrderWay());
+    }
+
+    foreach ($searchCriteria->getFilters() as $filterName => $filterValue) {
+        if ('is_allowed_for_review' === $filterName) {
+            $searchQueryBuilder->andWhere('dcur.`is_allowed_for_review` = :is_allowed_for_review');
+            $searchQueryBuilder->setParameter('is_allowed_for_review', $filterValue);
+
+            if (!$filterValue) {
+                $searchQueryBuilder->orWhere('dcur.`is_allowed_for_review` IS NULL');
+            }
+        }
+    }
+}
+```
+
+<Tip>
+  The `IF(... IS NULL, 0, ...)` expression ensures customers without a reviewer row are treated as "not allowed" rather than causing null-comparison issues in filters.
+</Tip>
+
+## Modifying the Customer form builder
+
+`hookActionCustomerFormBuilderModifier` adds the `SwitchType` field and pre-populates it from the database using `ReviewerRepository`:
+
+```php
+public function hookActionCustomerFormBuilderModifier(array $params)
+{
+    /** @var FormBuilderInterface $formBuilder */
+    $formBuilder = $params['form_builder'];
+    $formBuilder->add('is_allowed_for_review', SwitchType::class, [
+        'label' => $this->trans('Allow reviews', [], 'Modules.DemoHowToExtendSymfonyForm.Admin'),
+        'required' => false,
+    ]);
+
+    $result = false;
+    if (null !== $params['id']) {
+        $result = $this->get(ReviewerRepository::class)->getIsAllowedToReviewStatus((int) $params['id']);
+    }
+
+    $params['data']['is_allowed_for_review'] = $result;
+
+    $formBuilder->setData($params['data']);
+}
+```
+
+The `$params['id']` is `null` when creating a new customer, so the field defaults to `false` safely.
+
+## Persisting form data after save
+
+Both `hookActionAfterUpdateCustomerFormHandler` and `hookActionAfterCreateCustomerFormHandler` delegate to `updateCustomerReviewStatus()`:
+
+```php
+private function updateCustomerReviewStatus(array $params)
+{
+    $customerId = $params['id'];
+    /** @var array $customerFormData */
+    $customerFormData = $params['form_data'];
+    $isAllowedForReview = (bool) $customerFormData['is_allowed_for_review'];
+
+    $reviewerId = $this->get(ReviewerRepository::class)->findIdByCustomer($customerId);
+
+    $reviewer = new Reviewer($reviewerId);
+    if (0 >= $reviewer->id) {
+        $reviewer = $this->createReviewer($customerId);
+    }
+    $reviewer->is_allowed_for_review = $isAllowedForReview;
+
+    try {
+        if (false === $reviewer->update()) {
+            throw new CannotToggleAllowedToReviewStatusException(
+                sprintf('Failed to change status for reviewer with id "%s"', $reviewer->id)
+            );
+        }
+    } catch (PrestaShopException $exception) {
+        throw new CannotToggleAllowedToReviewStatusException(
+            'An unexpected error occurred when updating reviewer status'
+        );
+    }
+}
+```
+
+If no `Reviewer` row exists yet for the customer, `createReviewer()` is called to insert a new one before the update.
+
+## The Reviewer ObjectModel entity
+
+The `Reviewer` class extends PrestaShop's `ObjectModel` and maps to the `demoextendsymfonyform_reviewer` table:
+
+```php
+namespace PrestaShop\Module\DemoHowToExtendSymfonyForm\Entity;
+
+use PrestaShop\PrestaShop\Adapter\Entity\ObjectModel;
+
+class Reviewer extends ObjectModel
+{
+    public int $id_customer;
+
+    public int $is_allowed_for_review;
+
+    public static $definition = [
+        'table' => 'demoextendsymfonyform_reviewer',
+        'primary' => 'id_reviewer',
+        'fields' => [
+            'id_customer' => ['type' => self::TYPE_INT, 'validate' => 'isUnsignedInt'],
+            'is_allowed_for_review' => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
+        ],
+    ];
+}
+```
+
+The table is created at install time:
+
+```php
+private function installTables()
+{
+    $sql = '
+        CREATE TABLE IF NOT EXISTS `' . pSQL(_DB_PREFIX_) . 'demoextendsymfonyform_reviewer` (
+            `id_reviewer` INT(10) UNSIGNED NOT NULL AUTO_INCREMENT,
+            `id_customer` INT(10) UNSIGNED NOT NULL,
+            `is_allowed_for_review` TINYINT(1) NOT NULL,
+            PRIMARY KEY (`id_reviewer`)
+        ) ENGINE=' . pSQL(_MYSQL_ENGINE_) . ' COLLATE=utf8_unicode_ci;
+    ';
+
+    return Db::getInstance()->execute($sql);
+}
+```
+
+## The ReviewerRepository
+
+`ReviewerRepository` wraps a Doctrine DBAL `Connection` for read operations, keeping raw SQL out of the module main class:
+
+```php
+class ReviewerRepository
+{
+    public function __construct(
+        private readonly Connection $connection,
+        private readonly string $dbPrefix
+    ) {
+    }
+
+    public function findIdByCustomer(int $customerId): int
+    {
+        $queryBuilder = $this->connection->createQueryBuilder();
+        $queryBuilder
+            ->select('`id_reviewer`')
+            ->from($this->dbPrefix . 'demoextendsymfonyform_reviewer')
+            ->where('`id_customer` = :customer_id');
+        $queryBuilder->setParameter('customer_id', $customerId);
+
+        return (int) $queryBuilder->executeQuery()->fetchOne(PDO::FETCH_COLUMN);
+    }
+
+    public function getIsAllowedToReviewStatus(int $customerId): bool
+    {
+        $queryBuilder = $this->connection->createQueryBuilder();
+        $queryBuilder
+            ->select('`is_allowed_for_review`')
+            ->from($this->dbPrefix . 'demoextendsymfonyform_reviewer')
+            ->where('`id_customer` = :customer_id');
+        $queryBuilder->setParameter('customer_id', $customerId);
+
+        return (bool) $queryBuilder->executeQuery()->fetchOne(PDO::FETCH_COLUMN);
+    }
+}
+```
+
+The repository is wired via `config/services.yml`:
+
+```yaml
+services:
+  _defaults:
+    public: true
+  PrestaShop\Module\DemoHowToExtendSymfonyForm\Repository\ReviewerRepository:
+    arguments:
+      - '@doctrine.dbal.default_connection'
+      - '%database_prefix%'
+  PrestaShop\Module\DemoHowToExtendSymfonyForm\Controller\Admin\CustomerReviewController:
+    autoconfigure: true
+    autowire: true
+```
+
+## The CustomerReviewController
+
+The controller handles the inline grid toggle via a JSON response. It loads or creates a `Reviewer`, flips `is_allowed_for_review`, and returns the outcome:
+
+```php
+public function toggleIsAllowedForReviewAction(
+    int $customerId,
+    ReviewerRepository $reviewerRepository
+): JsonResponse
+{
+    try {
+        $reviewerId = $reviewerRepository->findIdByCustomer($customerId);
+        $reviewer = new Reviewer((int) $reviewerId);
+        if (0 >= $reviewer->id) {
+            $reviewer = $this->createReviewerIfNeeded($customerId);
+        }
+        $reviewer->is_allowed_for_review = (bool) !$reviewer->is_allowed_for_review;
+
+        if (false === $reviewer->update()) {
+            throw new CannotToggleAllowedToReviewStatusException(
+                sprintf('Failed to change status for reviewer with id "%s"', $reviewer->id)
+            );
+        }
+
+        return $this->json([
+            'status' => true,
+            'message' => $this->trans('Successful update.', [], 'Admin.Notifications.Success')
+        ]);
+    } catch (ReviewerException $e) {
+        return $this->json([
+            'status' => false,
+            'message' => $this->getErrorMessageForException($e, $this->getErrorMessageMapping())
+        ]);
+    }
+}
+```
+
+## ObjectModel vs Doctrine ORM
+
+| Aspect | demoextendsymfonyform1 (this module) | demoextendsymfonyform2 |
+|---|---|---|
+| Persistence layer | `ObjectModel` | Doctrine ORM entity |
+| Schema management | Manual `CREATE TABLE` in `install()` | Doctrine schema handled by `Installer` |
+| Data access | `ReviewerRepository` (DBAL) | Doctrine `EntityRepository` |
+| Field type | Boolean toggle | Image file upload |
+| Complexity | Lower — good starting point | Higher — use when you need Doctrine features |
+
+<Tip>
+  ObjectModel is the simplest path when you need a single custom table with a few typed columns. If your module already uses Doctrine or you need relationships and schema migrations, see [demoextendsymfonyform2](/modules/demoextendsymfonyform2).
+</Tip>

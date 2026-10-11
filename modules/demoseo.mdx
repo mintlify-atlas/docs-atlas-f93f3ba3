@@ -1,0 +1,186 @@
+---
+title: "Alter Front-Office SEO Variables with actionFrontControllerSetVariables"
+sidebarTitle: "SEO Variables"
+description: "Override page title, meta description, and Open Graph tags on any front-office page by modifying the Smarty variables via the actionFrontControllerSetVariables hook."
+---
+
+PrestaShop 9.2.0 introduced first-class **structured data** support in the core: product pages, category pages, and other front-office controllers now build a `structured_data` array that themes serialize into `<script type="application/ld+json">` blocks. The `actionFrontControllerSetVariables` hook fires after the front controller prepares all its Smarty variables, giving modules a chance to inspect and override them before the template renders.
+
+The `demoseo` module demonstrates three practical SEO modifications using a single hook method:
+
+1. Inject an `aggregateRating` block and a merchant return policy into product structured data.
+2. Add `contactPoint` details to the organization structured data shown on every page.
+3. Override the `meta.title` Smarty variable on category pages to append a marketing suffix.
+
+<Note>
+  The `actionFrontControllerSetVariables` hook was added in PrestaShop 1.7.5.0, but **structured data** (`$params['templateVars']['structured_data']`) requires **PrestaShop 9.2.0** or later. The module declares `'min' => '9.2.0'` accordingly.
+</Note>
+
+## Hook method walkthrough
+
+### Registration
+
+Register the hook during `install()`:
+
+```php
+public function install()
+{
+    return parent::install() && $this->registerHook('actionFrontControllerSetVariables');
+}
+```
+
+### The full hook method
+
+```php
+// demoseo.php
+public function hookActionFrontControllerSetVariables($params)
+{
+    /*
+     * Example 1
+     * Add or change structured data of the product. You can easily add data from external modules
+     * or change the current ones, to complement your possible modifications done in other hooks.
+     */
+    if ($this->context->controller->php_self === 'product') {
+        if (isset($params['templateVars']['structured_data']['product'])) {
+            // Adding aggregate rating to the product structured data, from any review module or custom source
+            $params['templateVars']['structured_data']['product']['aggregateRating'] = [
+                '@type'       => 'AggregateRating',
+                'ratingValue' => 4.8,
+                'reviewCount' => 27,
+                'bestRating'  => 5,
+                'worstRating' => 1,
+            ];
+        }
+        if (isset($params['templateVars']['structured_data']['product']['offers'])) {
+            // Add return policy depending on your other shop logic
+            $params['templateVars']['structured_data']['product']['offers']['hasMerchantReturnPolicy'] = [
+                '@type'                 => 'MerchantReturnPolicy',
+                'applicableCountry'     => 'PL',
+                'returnPolicyCategory'  => 'https://schema.org/MerchantReturnFiniteReturnWindow',
+                'merchantReturnDays'    => 30,
+                'returnMethod'          => 'https://schema.org/ReturnByMail',
+                'returnFees'            => 'https://schema.org/FreeReturn',
+            ];
+
+            // Override availability
+            $params['templateVars']['structured_data']['product']['offers']['availability']
+                = 'https://schema.org/LimitedAvailability';
+        }
+    }
+
+    /*
+     * Example 2
+     * Add contact points to the organization structured data.
+     */
+    if (isset($params['templateVars']['structured_data']['organization'])) {
+        $params['templateVars']['structured_data']['organization']['contactPoint'] = [
+            [
+                '@type'             => 'ContactPoint',
+                'telephone'         => '+420123456789',
+                'contactType'       => 'customer support',
+                'areaServed'        => 'PL',
+                'availableLanguage' => ['pl', 'cs', 'sk'],
+            ],
+        ];
+    }
+
+    /*
+     * Example 3
+     * You can also easily change meta title and descriptions of any pages, for example to alter the way automatic
+     * meta is generated, append shop name to the end and so on.
+     */
+    if ($this->context->controller->getPageName() === 'category') {
+        $categoryObject = new Category(
+            Tools::getValue('id_category'),
+            $this->context->language->id,
+            $this->context->shop->id
+        );
+        $params['templateVars']['page']['meta']['title'] =
+            $categoryObject->name . ' for the best prices | ' . $this->context->shop->name;
+    }
+}
+```
+
+## Understanding the `$params` structure
+
+The hook passes `$params['templateVars']` — a reference to the full Smarty template variable array. All modifications are reflected immediately in the rendered page because PHP arrays are passed by reference when accessed via `$params`.
+
+### Structured data keys
+
+| Key path | Schema.org type | Set on |
+|---|---|---|
+| `structured_data.product` | `Product` | Product pages |
+| `structured_data.product.offers` | `Offer` | Product pages with price |
+| `structured_data.organization` | `Organization` | All pages (global) |
+| `structured_data.breadcrumb` | `BreadcrumbList` | Most front pages |
+
+### Meta variables
+
+| Key path | Description |
+|---|---|
+| `page.meta.title` | The `<title>` tag and `og:title` |
+| `page.meta.description` | The `<meta name="description">` tag |
+| `page.meta.keywords` | The `<meta name="keywords">` tag |
+
+<Warning>
+  Always check that the key you want to modify **exists before accessing it** (use `isset()`). Not every page has every structured-data block, and writing to a non-existent nested key will cause a PHP notice or, worse, silently corrupt the array.
+</Warning>
+
+## Detecting the current page
+
+Use either of these to identify which page is rendering:
+
+```php
+// Using the legacy controller identifier
+$this->context->controller->php_self === 'product'
+
+// Using getPageName() (available on all FrontController subclasses)
+$this->context->controller->getPageName() === 'category'
+```
+
+Common `php_self` / page name values:
+
+| Value | Page |
+|---|---|
+| `index` | Homepage |
+| `category` | Category listing |
+| `product` | Product detail |
+| `cart` | Shopping cart |
+| `order` | Checkout |
+| `contact` | Contact form |
+| `cms` | CMS page |
+
+## Use cases
+
+- **Dynamic review scores**: Pull live aggregate ratings from a review module and inject them into the `aggregateRating` block.
+- **Attribute-specific titles**: For configurable products, append the selected attribute combination name to `page.meta.title`.
+- **Canonical refinement**: Set `page.meta.canonical` to the attribute-free product URL to prevent duplicate-content issues.
+- **Seasonal promotions**: Append " — Summer Sale" to every category title during a promotion period.
+- **Country-specific return policies**: Read the customer's country from `Context` and emit the correct `MerchantReturnPolicy` block.
+
+## Installation
+
+<Steps>
+  <Step title="Copy the module">
+    Place the `demoseo` directory inside your PrestaShop `modules/` folder. The directory name must be `demoseo`.
+  </Step>
+  <Step title="Install the module">
+    From the Back Office **Module Manager**, or via CLI:
+    ```bash
+    php bin/console prestashop:module install demoseo
+    ```
+    The `install()` method registers the `actionFrontControllerSetVariables` hook.
+  </Step>
+  <Step title="Test on a category page">
+    Open any category page in the front office. The browser `<title>` should now read **"Category Name for the best prices | Shop Name"**.
+  </Step>
+  <Step title="Test structured data on a product page">
+    Open any product page, view the page source, and look for the `application/ld+json` block. It should contain `aggregateRating` and `hasMerchantReturnPolicy` nodes added by the module.
+
+    Validate the output at [Google's Rich Results Test](https://search.google.com/test/rich-results).
+  </Step>
+</Steps>
+
+<Tip>
+  Your active theme must output structured data for the module's changes to appear. The [Hummingbird](https://github.com/PrestaShop/hummingbird) reference theme supports structured data output starting from the version linked in [this pull request](https://github.com/PrestaShop/hummingbird/pull/1037). Check your theme's templates if the `<script type="application/ld+json">` block is missing.
+</Tip>

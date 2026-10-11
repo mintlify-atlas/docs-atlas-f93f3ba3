@@ -1,0 +1,282 @@
+---
+title: "Display Extra Product Properties Across Multiple Front-Office Hooks"
+sidebarTitle: "Extra Properties"
+description: "Register a custom product property and surface it across cart, checkout, order detail, category, and CMS pages using multiple front-office display hooks."
+---
+
+The `demoextraproperty` module is the reference implementation for PrestaShop's **native extra properties** system — a structured way to attach custom fields to core entities (Product, Category, Customer, Address, CMS, Cart, Order, Combination) and expose their values both in the Back Office and on the front office. Rather than creating custom database tables and ObjectModel subclasses, a module calls `$this->registerExtraProperty()` in `install()` with an `ExtraPropertyDefinition` that specifies the entity, field name, type, scope, form placement, validation constraints, and front-office visibility — the platform handles the rest.
+
+<Note>
+This module requires **PrestaShop 9.2.0 or later**. No Composer dependencies are required.
+</Note>
+
+## Installation
+
+<Steps>
+  <Step title="Clone or download the module">
+    Place the module directory inside your PrestaShop `modules/` folder and ensure the folder is named `demoextraproperty`.
+  </Step>
+  <Step title="Install the module">
+    Install via the Back Office Module Manager, or run:
+    ```bash
+    php bin/console prestashop:module install demoextraproperty
+    ```
+  </Step>
+</Steps>
+
+## What an "extra property" is
+
+An extra property is a custom data field that:
+
+- Is **registered against a named core entity** (`product`, `category`, `customer`, `address`, `cms`, `cart`, `order`, `combination`).
+- Has a **type** (`BOOL`, `STRING`, `INT`, `FLOAT`, `DATE`, `HTML`, `JSON`, `CHOICE`) that drives database storage and form rendering.
+- Has a **scope** (`COMMON` — one value per entity, `LANG` — one value per entity per language, `SHOP` — one value per entity per shop).
+- Can be automatically **injected into existing Back Office forms and grids** via `associatedForms` and `associatedGrids`.
+- Can be **exposed through the Admin API** via `associatedApis`.
+- Can be **filtered out of front-office responses** when `displayFront: false`.
+
+On the Front Office, extra properties are read through the entity's `extra_properties` accessor — either from a presenter LazyArray (`$product.extra_properties.demoextraproperty.field_name` in Smarty) or from an ObjectModel instance accessed directly (`$product->extra_properties['demoextraproperty']['field_name']` in PHP).
+
+## Registered extra properties
+
+The module registers extra properties across eight entities:
+
+### Product
+
+| Property | Scope | Type | Form placement | Notes |
+|---|---|---|---|---|
+| `is_dangerous` | `common` | `BOOL` | `product:options.suppliers:before` | SwitchType — no constraints needed for a boolean toggle |
+| `video_link` | `lang` | `STRING` (URL) | `product` | Multilang URL with `DefaultLanguage` + `Url` constraints |
+| `custom_date` | `shop` | `DATE` | `product` | Date per shop, indexed with a SQL KEY |
+| `date_last_seen` | `common` | `DATE` | none (read-only) | Auto-updated by `hookDisplayFooterProduct`; no form, grid-only |
+| `packaging_type` | `common` | `CHOICE` | `product` | Enum of `standard`, `gift`, `bulk`; nullable with placeholder |
+
+### Category
+
+| Property | Scope | Type | Notes |
+|---|---|---|---|
+| `theme_color` | `common` | `STRING` | Required; `Assert\NotBlank` + `Assert\CssColor` |
+| `marketing_note` | `common` | `HTML` | `displayFront: false` — BO and API only |
+| `id_supplier` | `common` | `INT` | Supplier selector widget |
+
+### Customer
+
+| Property | Scope | Type | Notes |
+|---|---|---|---|
+| `credit_limit` | `common` | `FLOAT` | MoneyType; `Assert\PositiveOrZero` |
+| `extra_json` | `common` | `JSON` | PHP array stored as JSON; decoded on read |
+| `internal_note` | `common` | `STRING` | `displayFront: false` — never reaches FO |
+
+### Address, CMS, Cart, Order, Combination
+
+| Entity | Property | Scope | Notes |
+|---|---|---|---|
+| `address` | `delivery_note` | `common` | Shown in manufacturer addresses grid |
+| `cms` | `promo_banner` | `lang` | Manual form integration via CMS form hooks |
+| `cms` | `revision_code` | `common` | Manual form integration via CMS form hooks |
+| `cart` | `delivery_note` | `common` | Seeded by `actionCartSave`; shown on checkout |
+| `order` | `delivery_note` | `common` | Copied from cart at `actionValidateOrder` |
+| `combination` | `ean_verified` | `common` | Exposed on combinations API endpoint |
+| `combination` | `restock_note` | `shop` | One value per store; `displayFront: false` |
+
+## Registering a property: the `ExtraPropertyDefinition`
+
+Each call to `registerExtraProperty()` passes an `ExtraPropertyDefinition` constructor with named arguments. Here is an annotated example for the `is_dangerous` boolean product field:
+
+```php
+// demoextraproperty.php (excerpt from install())
+$productDangerousRegistered = $this->registerExtraProperty(
+    new ExtraPropertyDefinition(
+        entityName: 'product',
+        propertyName: 'is_dangerous',
+        type: ExtraPropertyType::BOOL,
+        scope: ExtraPropertyScope::COMMON,
+        defaultValue: 0,
+        nullable: false,
+        displayFront: true,
+        associatedApis: ['/products', '/products/{productId}'],
+        associatedForms: ['product:options.suppliers:before'],
+        associatedGrids: ['product:reference'],
+        formType: SwitchType::class,
+        // No constraints: a SwitchType always yields a valid 0/1 — demonstrates that validation is opt-in.
+        labelWording: 'Dangerous product',
+        labelDomain: self::TRANSLATION_DOMAIN,
+        descriptionWording: 'Indicates whether the product is dangerous',
+        descriptionDomain: self::TRANSLATION_DOMAIN,
+    )
+);
+```
+
+And the multilang `video_link` field with Symfony validation constraints:
+
+```php
+$productVideoLinkRegistered = $this->registerExtraProperty(
+    new ExtraPropertyDefinition(
+        entityName: 'product',
+        propertyName: 'video_link',
+        type: ExtraPropertyType::STRING,
+        scope: ExtraPropertyScope::LANG,
+        nullable: true,
+        sqlIndex: ExtraPropertySqlIndex::UNIQUE,
+        displayFront: true,
+        associatedApis: ['/products', '/products/{productId}'],
+        associatedForms: ['product'],
+        formType: UrlType::class,
+        // Showcases BOTH multilang validation styles on one field (Symfony-native):
+        constraints: [
+            // Whole array: if any language is filled, the default language must be too.
+            new DefaultLanguage(fieldName: 'Video link'),
+            // Each language value: must be a valid URL (Assert\All applies it per language).
+            new Assert\All([new Assert\Url()]),
+        ],
+        labelWording: 'Video link',
+        labelDomain: self::TRANSLATION_DOMAIN,
+        descriptionWording: 'Video URL per language',
+        descriptionDomain: self::TRANSLATION_DOMAIN,
+    )
+);
+```
+
+## Front-office hooks registered
+
+The module registers the following hooks to display extra property values on the front office:
+
+| Hook | Template | Displayed context |
+|---|---|---|
+| `displayProductAdditionalInfo` | `product_additional_info.tpl` | Product page — all extra properties + dangerous warning |
+| `displayCartExtraProductInfo` | `cart_extra_product_info.tpl` | Cart — per-product extra properties |
+| `displayCheckoutSummaryTop` | `checkout_summary_top.tpl` | Checkout summary — cart delivery note |
+| `displayOrderDetail` | `order_detail.tpl` | Customer order detail page — order delivery note |
+| `displayHeaderCategory` | `category_header.tpl` | Category listing header |
+| `displayCMSDisputeInformation` | `cms_page_extra.tpl` | CMS pages — promo banner and revision code |
+| `displayCustomerAccountTop` | `customer_account_top.tpl` | Customer account page — JSON metadata |
+| `displayFooterProduct` | `product_footer.tpl` | Product page footer — updates `date_last_seen` |
+| `actionCartSave` | — (PHP only) | Seeds `delivery_note` on the cart |
+| `actionValidateOrder` | — (PHP only) | Copies cart `delivery_note` to the order |
+
+### Template: `product_additional_info.tpl`
+
+Uses both the generic `_extra_properties.tpl` loop and a named field access pattern:
+
+```smarty
+{* views/templates/hook/product_additional_info.tpl *}
+<section class="demoextraproperty demoextraproperty--product">
+  <h4>{l s='Extra properties (demoextraproperty)' d='Modules.Demoextraproperty.Main'}</h4>
+
+  {* 1. Generic loop — iterates over all fields registered by this module. *}
+  {include file='./_extra_properties.tpl' objectModel=$product}
+
+  {* 2. Named access — read a specific field directly without looping.
+        Useful when you need to act on a known field (conditional display, formatting, etc.). *}
+  {if $product.extra_properties.demoextraproperty.is_dangerous|intval}
+    <p class="demoextraproperty__warning" style="color: #c0392b; font-weight: bold; margin-top: 0.5rem;">
+      {l s='⚠ This product is marked as dangerous.' d='Modules.Demoextraproperty.Admin'}
+    </p>
+  {/if}
+</section>
+```
+
+### Template: `checkout_summary_top.tpl`
+
+Reads the cart's extra property through the Smarty `$cart` global (a `CartLazyArray`):
+
+```smarty
+{* views/templates/hook/checkout_summary_top.tpl *}
+{if isset($cart.extra_properties.demoextraproperty.delivery_note) && $cart.extra_properties.demoextraproperty.delivery_note}
+  <section class="demoextraproperty demoextraproperty--cart" style="margin-bottom: 1rem;">
+    <h4>{l s='Delivery note (demoextraproperty)' d='Modules.Demoextraproperty.Main'}</h4>
+    <p>{$cart.extra_properties.demoextraproperty.delivery_note|escape:'htmlall':'UTF-8'}</p>
+  </section>
+{/if}
+```
+
+### Template: `cart_extra_product_info.tpl`
+
+Shows extra properties for each product line in the cart:
+
+```smarty
+{* views/templates/hook/cart_extra_product_info.tpl *}
+<div class="demoextraproperty demoextraproperty--cart">
+  <h4>{l s='Extra properties (demoextraproperty)' d='Modules.Demoextraproperty.Main'}</h4>
+
+  {include file='./_extra_properties.tpl' objectModel=$product}
+</div>
+```
+
+<Tip>
+The `_extra_properties.tpl` partial loops over `$objectModel->extra_properties.demoextraproperty` and handles all field types including JSON (iterated as a decoded PHP array) and `displayFront: false` filtering (handled natively — those fields never appear in the template).
+</Tip>
+
+## The cart → order delivery note copy pattern
+
+The cart's extra property is seeded by `hookActionCartSave` and must be copied to the order at checkout because the cart is deleted when the order is confirmed:
+
+```php
+// demoextraproperty.php
+public function hookActionValidateOrder(array $params): void
+{
+    $cart = $params['cart'] ?? null;
+    $order = $params['order'] ?? null;
+    if (!$cart instanceof Cart || !$order instanceof Order || (int) $order->id <= 0) {
+        return;
+    }
+
+    $deliveryNote = $cart->extra_properties['demoextraproperty']['delivery_note'];
+    if (!is_string($deliveryNote) || '' === $deliveryNote) {
+        return;
+    }
+
+    $order->extra_properties['demoextraproperty']['delivery_note'] = $deliveryNote;
+    $order->update();
+}
+```
+
+## Translation files (XLF format)
+
+The module ships French translations in the XLF format under `translations/fr-FR/`. There are two files:
+
+- `ModulesDemoextrapropertyAdmin.fr-FR.xlf` — translations for admin-facing strings (labels, descriptions, error messages)
+- `ModulesDemoextrapropertyMain.fr-FR.xlf` — translations for front-office facing strings
+
+Each translation unit maps a source string to its target:
+
+```xml
+<!-- translations/fr-FR/ModulesDemoextrapropertyAdmin.fr-FR.xlf (excerpt) -->
+<trans-unit id="5468970782261225b646d31041a7a801">
+  <source>Dangerous product</source>
+  <target>Produit dangereux</target>
+</trans-unit>
+<trans-unit id="3bd174f230facd43f09cb53749723e4f">
+  <source>Video link</source>
+  <target>Lien vidéo</target>
+</trans-unit>
+<trans-unit id="45e035baf33a8e403766a606457f8b10">
+  <source>Theme color</source>
+  <target>Couleur du thème</target>
+</trans-unit>
+```
+
+For a translation domain string to appear in the Back Office translation interface, it must be declared in PHP via `$this->trans(...)` AND exist in at least one shipped XLF file.
+
+## Unregistering extra properties
+
+On uninstall, call `$this->unregisterExtraProperty()` for each registered property. The `$dropColumn` flag controls whether the SQL storage column is physically removed:
+
+```php
+// demoextraproperty.php (excerpt from uninstall())
+public function uninstall(): bool
+{
+    // false = keep columns in DB after uninstall
+    $dropColumn = false;
+
+    return
+        $this->unregisterExtraProperty(new ExtraPropertyDefinition('product', 'video_link'), $dropColumn)
+        && $this->unregisterExtraProperty(new ExtraPropertyDefinition('product', 'is_dangerous'), $dropColumn)
+        // ... all other properties
+        && parent::uninstall();
+}
+```
+
+<Warning>
+Setting `$dropColumn = true` permanently deletes the stored data for all entities. Use `false` during development so data survives module reinstalls, and only drop columns when you intentionally want to purge the data.
+</Warning>

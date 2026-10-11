@@ -1,0 +1,340 @@
+---
+title: "Extend Customer Forms with CQRS Commands and Queries"
+sidebarTitle: "CQRS Form Extension"
+description: "Apply the CQRS pattern to customer form extension: dispatch typed commands on save and queries on load, separating read and write concerns cleanly."
+---
+
+The `demoextendsymfonyform3` module implements exactly the same visible feature as [demoextendsymfonyform1](/modules/demoextendsymfonyform1) — a yes/no "Allow reviews" toggle in the Customer listing and edit form — but replaces direct ObjectModel calls with **CQRS (Command Query Responsibility Segregation)**. Read operations go through a typed `Query` dispatched on the `QueryBus`; write operations go through a typed `Command` dispatched on the `CommandBus`. This strict separation keeps domain logic testable and decoupled from framework plumbing. This module is a recommended pattern when building larger or more complex modules on PrestaShop 9.
+
+## What the module adds
+
+- The same **is_allowed_for_review** toggle column and filter in the Customers grid as `demoextendsymfonyform1`.
+- A `GetReviewerSettingsForForm` query dispatched on the query bus to load the current value into the form.
+- An `UpdateIsAllowedToReviewCommand` dispatched on the command bus to persist changes after save.
+- A `ToggleIsAllowedToReviewCommand` dispatched by the `CustomerReviewController` for the inline grid toggle.
+- Domain exceptions (`CannotCreateReviewerException`, `CannotToggleAllowedToReviewStatusException`) for clean error handling.
+
+## Installation
+
+<Steps>
+  <Step title="Place the module">
+    Clone or download the module into the `modules/` directory of your PrestaShop installation. The directory must be named `demoextendsymfonyform3`.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/demoextendsymfonyform3
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    Enable it from **Back Office → Module Manager**, or run:
+    ```bash
+    php ./bin/console prestashop:module install demoextendsymfonyform3
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  PrestaShop 9.0.0 or later is required. The `install()` method creates the `democqrshooksusage_reviewer` table and registers all five hooks automatically.
+</Note>
+
+## CQRS overview
+
+In the CQRS pattern:
+- **Commands** express intent to mutate state. They carry only the data needed for the operation and return nothing (or throw a domain exception on failure).
+- **Queries** request data without side effects. They return a typed result object.
+- **Handlers** contain the actual business logic. Each command/query has exactly one handler.
+- The **CommandBus** and **QueryBus** route messages to their handlers.
+
+```
+Form load  ──► GetReviewerSettingsForForm (Query)  ──► GetReviewerSettingsForFormHandler
+                                                           └── ReviewerRepository.getIsAllowedToReviewStatus()
+                                                           └── returns ReviewerSettingsForForm
+
+Form save  ──► UpdateIsAllowedToReviewCommand       ──► UpdateIsAllowedToReviewHandler
+                                                           └── Reviewer ObjectModel.update()
+
+Grid toggle ─► ToggleIsAllowedToReviewCommand       ──► ToggleIsAllowedToReviewHandler
+                                                           └── Reviewer ObjectModel.update()
+```
+
+## Directory structure
+
+```
+src/
+└── Domain/
+    └── Reviewer/
+        ├── Command/
+        │   ├── ToggleIsAllowedToReviewCommand.php
+        │   └── UpdateIsAllowedToReviewCommand.php
+        ├── CommandHandler/
+        │   ├── AbstractReviewerHandler.php
+        │   ├── ToggleIsAllowedToReviewHandler.php
+        │   └── UpdateIsAllowedToReviewHandler.php
+        ├── Exception/
+        │   ├── CannotCreateReviewerException.php
+        │   ├── CannotToggleAllowedToReviewStatusException.php
+        │   └── ReviewerException.php
+        ├── Query/
+        │   └── GetReviewerSettingsForForm.php
+        ├── QueryHandler/
+        │   └── GetReviewerSettingsForFormHandler.php
+        └── QueryResult/
+            └── ReviewerSettingsForForm.php
+```
+
+The domain layer is entirely under `src/Domain/Reviewer/` and has no dependency on Symfony HTTP or PrestaShop controller infrastructure.
+
+## Commands
+
+### ToggleIsAllowedToReviewCommand
+
+Used by the controller to flip the current review permission state. It wraps the customer ID in the `CustomerId` value object, which enforces valid positive integer constraints:
+
+```php
+namespace DemoCQRSHooksUsage\Domain\Reviewer\Command;
+
+use PrestaShop\PrestaShop\Core\Domain\Customer\ValueObject\CustomerId;
+
+class ToggleIsAllowedToReviewCommand
+{
+    private CustomerId $customerId;
+
+    public function __construct(int $customerId)
+    {
+        $this->customerId = new CustomerId($customerId);
+    }
+
+    public function getCustomerId(): CustomerId
+    {
+        return $this->customerId;
+    }
+}
+```
+
+### UpdateIsAllowedToReviewCommand
+
+Used after form submission. It carries both the customer ID and the explicit desired state:
+
+```php
+class UpdateIsAllowedToReviewCommand
+{
+    private CustomerId $customerId;
+
+    public function __construct(
+        int $customerId,
+        private readonly bool $isAllowedToReview
+    ) {
+        $this->customerId = new CustomerId($customerId);
+    }
+
+    public function getCustomerId(): CustomerId
+    {
+        return $this->customerId;
+    }
+
+    public function isAllowedToReview(): bool
+    {
+        return $this->isAllowedToReview;
+    }
+}
+```
+
+<Tip>
+  Using typed value objects like `CustomerId` in commands adds a validation boundary at the domain's edge. If a caller passes an invalid integer (e.g. 0 or negative), the value object constructor throws before any handler runs.
+</Tip>
+
+## Command handlers
+
+### ToggleIsAllowedToReviewHandler
+
+The `#[AsCommandHandler]` attribute registers the handler with the command bus automatically:
+
+```php
+#[AsCommandHandler]
+class ToggleIsAllowedToReviewHandler extends AbstractReviewerHandler
+{
+    public function __construct(
+        private readonly ReviewerRepository $reviewerRepository
+    ) {
+    }
+
+    public function handle(ToggleIsAllowedToReviewCommand $command): void
+    {
+        $reviewerId = $this->reviewerRepository->findIdByCustomer($command->getCustomerId()->getValue());
+        $reviewer = new Reviewer($reviewerId);
+
+        if (0 >= $reviewer->id) {
+            $reviewer = $this->createReviewer($command->getCustomerId()->getValue());
+        }
+
+        $reviewer->is_allowed_for_review = (bool) !$reviewer->is_allowed_for_review;
+
+        try {
+            if (false === $reviewer->update()) {
+                throw new CannotToggleAllowedToReviewStatusException(
+                    sprintf('Failed to change status for reviewer with id "%s"', $reviewer->id)
+                );
+            }
+        } catch (PrestaShopException $exception) {
+            throw new CannotToggleAllowedToReviewStatusException(
+                'An unexpected error occurred when updating reviewer status'
+            );
+        }
+    }
+}
+```
+
+The `AbstractReviewerHandler` provides the shared `createReviewer()` helper used when no row exists yet.
+
+## Query and QueryHandler
+
+### GetReviewerSettingsForForm
+
+The query carries a nullable `CustomerId` — null for new customers:
+
+```php
+class GetReviewerSettingsForForm
+{
+    private ?CustomerId $customerId;
+
+    public function __construct(?int $customerId)
+    {
+        $this->customerId = null !== $customerId ? new CustomerId((int) $customerId) : null;
+    }
+
+    public function getCustomerId(): ?CustomerId
+    {
+        return $this->customerId;
+    }
+}
+```
+
+### GetReviewerSettingsForFormHandler
+
+The handler returns a `ReviewerSettingsForForm` result object. When the customer ID is null (new customer), it returns `false` by default:
+
+```php
+#[AsQueryHandler]
+class GetReviewerSettingsForFormHandler
+{
+    public function __construct(
+        private readonly ReviewerRepository $reviewerRepository
+    ) {
+    }
+
+    public function handle(GetReviewerSettingsForForm $query)
+    {
+        if (null === $query->getCustomerId()) {
+            return new ReviewerSettingsForForm(false);
+        }
+
+        return new ReviewerSettingsForForm(
+            $this->reviewerRepository->getIsAllowedToReviewStatus($query->getCustomerId()->getValue())
+        );
+    }
+}
+```
+
+The `ReviewerSettingsForForm` result object is a simple DTO:
+
+```php
+class ReviewerSettingsForForm
+{
+    public function __construct(
+        private bool $isAllowedForReview
+    ) {
+    }
+
+    public function isAllowedForReview(): bool
+    {
+        return $this->isAllowedForReview;
+    }
+}
+```
+
+## Dispatching commands and queries from hooks
+
+The main module class retrieves the buses via the service container and dispatches:
+
+```php
+// Reading data on form load
+public function hookActionCustomerFormBuilderModifier(array $params)
+{
+    $formBuilder = $params['form_builder'];
+    $formBuilder->add('is_allowed_for_review', SwitchType::class, [
+        'label' => $this->trans('Allow reviews', [], 'Modules.Democqrshooksusage.Admin'),
+        'required' => false,
+    ]);
+
+    /** @var CommandBusInterface $queryBus */
+    $queryBus = $this->get('prestashop.core.query_bus');
+
+    /** @var ReviewerSettingsForForm $reviewerSettings */
+    $reviewerSettings = $queryBus->handle(new GetReviewerSettingsForForm($params['id']));
+
+    $params['data']['is_allowed_for_review'] = $reviewerSettings->isAllowedForReview();
+    $formBuilder->setData($params['data']);
+}
+
+// Writing data after form save
+private function updateCustomerReviewStatus(array $params)
+{
+    $customerId = $params['id'];
+    $customerFormData = $params['form_data'];
+    $isAllowedForReview = (bool) $customerFormData['is_allowed_for_review'];
+
+    /** @var CommandBusInterface $commandBus */
+    $commandBus = $this->get('prestashop.core.command_bus');
+
+    try {
+        $commandBus->handle(new UpdateIsAllowedToReviewCommand(
+            $customerId,
+            $isAllowedForReview
+        ));
+    } catch (ReviewerException $exception) {
+        $this->handleException($exception);
+    }
+}
+```
+
+## Dispatching from the controller
+
+The `CustomerReviewController` uses `$this->dispatchCommand()` — a helper provided by `PrestaShopAdminController` — which internally delegates to the command bus:
+
+```php
+public function toggleIsAllowedForReviewAction(int $customerId): JsonResponse
+{
+    try {
+        $this->dispatchCommand(new ToggleIsAllowedToReviewCommand((int) $customerId));
+
+        return $this->json([
+            'status' => true,
+            'message' => $this->trans('Successful update.', [], 'Admin.Notifications.Success')
+        ]);
+    } catch (ReviewerException $e) {
+        return $this->json([
+            'status' => false,
+            'message' => $this->getErrorMessageForException($e, $this->getErrorMessageMapping())
+        ]);
+    }
+}
+```
+
+No direct entity access or repository calls appear in the controller — all that logic lives in the handler.
+
+## demoextendsymfonyform1 vs demoextendsymfonyform3
+
+Both modules add the same field with the same hooks. The architectural difference is entirely in how they read and write data:
+
+| Aspect | demoextendsymfonyform1 | demoextendsymfonyform3 (this module) |
+|---|---|---|
+| Read on form load | `ReviewerRepository::getIsAllowedToReviewStatus()` called directly | `GetReviewerSettingsForForm` query dispatched on QueryBus |
+| Write on form save | `Reviewer->update()` called directly in the hook | `UpdateIsAllowedToReviewCommand` dispatched on CommandBus |
+| Grid toggle action | `Reviewer->update()` called in controller | `ToggleIsAllowedToReviewCommand` dispatched via `dispatchCommand()` |
+| Domain layer | None — logic in module main class | `Domain/Reviewer/` namespace with commands, queries, handlers |
+| Testability | Harder — requires full PrestaShop bootstrap | Handlers are plain PHP classes; unit-testable in isolation |
+
+<Note>
+  CQRS is an architectural choice, not a requirement. PrestaShop does not mandate it for modules. The pattern adds boilerplate but pays off in larger modules where separating read and write paths improves testability and maintainability. For simple single-field additions, the approach in `demoextendsymfonyform1` is perfectly valid.
+</Note>

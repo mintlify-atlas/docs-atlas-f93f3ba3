@@ -1,0 +1,144 @@
+---
+title: "Add Extra Content Blocks to the Front-Office Product Page"
+sidebarTitle: "Product Extra Content"
+description: "Use the displayProductExtraContent hook to inject additional content blocks below the product description on the PrestaShop front-office product page."
+---
+
+The `demoproductextracontent` module is the minimal reference example for adding extra content tabs to the front-office product page. PrestaShop's default themes render the output of `displayProductExtraContent` as additional tabs alongside the default product description tab. The hook expects an array of `ProductExtraContent` objects — each with a title and HTML content string — making it trivial to inject rich content blocks without overriding any theme template.
+
+<Note>
+This module is compatible with **PrestaShop 1.7.0 and later**, including PrestaShop 9.
+</Note>
+
+## Installation
+
+<Steps>
+  <Step title="Clone or download the module">
+    Place the module directory inside your PrestaShop `modules/` folder and ensure the folder is named `demoproductextracontent`.
+  </Step>
+  <Step title="Install the module">
+    Install via the Back Office Module Manager, or run:
+    ```bash
+    php bin/console prestashop:module install demoproductextracontent
+    ```
+  </Step>
+  <Step title="Verify in the front office">
+    Open any product page. Two additional tabs — **First custom tab** and **Second custom tab** — should appear alongside the default product description tabs.
+  </Step>
+</Steps>
+
+## The `displayProductExtraContent` hook
+
+The hook fires on the product detail page, after the core product data has been assembled. A hook implementation must return an **array of `ProductExtraContent` objects**. Each object carries:
+
+- **Title** — the label shown on the tab.
+- **Content** — the HTML string rendered inside the tab panel.
+- **Class** (optional) — a CSS class applied to the tab container for custom styling.
+
+Here is the complete implementation from the module:
+
+```php
+// demoproductextracontent.php
+public function hookDisplayProductExtraContent($params) {
+    return [
+        (new PrestaShop\PrestaShop\Core\Product\ProductExtraContent())
+            ->setTitle('First custom tab')
+            ->setContent('Content of the first custom tab'),
+        (new PrestaShop\PrestaShop\Core\Product\ProductExtraContent())
+            ->setTitle('Second custom tab')
+            ->setContent('Content of the second custom tab')
+    ];
+}
+```
+
+Returning an array of multiple objects produces multiple tabs in a single hook call. The theme iterates the array and renders one tab per object.
+
+## Full module source
+
+The complete module class is intentionally minimal — the hook implementation is the only business logic:
+
+```php
+// demoproductextracontent.php
+declare(strict_types=1);
+
+class DemoProductExtraContent extends Module
+{
+    public function __construct()
+    {
+        $this->name = 'demoproductextracontent';
+        $this->author = 'PrestaShop';
+        $this->version = '1.0.0';
+        $this->ps_versions_compliancy = ['min' => '1.7.0', 'max' => '9.99.99'];
+
+        parent::__construct();
+
+        $this->displayName = $this->trans('DemoProductExtraContent', [], 'Modules.DemoProductExtraContent.Config');
+        $this->description = $this->trans('DemoProductExtraContent module description', [], 'Modules.DemoProductExtraContent.Config');
+    }
+
+    /**
+     * @return bool
+     */
+    public function install()
+    {
+        return parent::install() &&
+            $this->registerHook('displayProductExtraContent');
+    }
+
+    /**
+     * Add extra content to the product FO page, by default, it renders as tabs on the product FO page.
+     */
+    public function hookDisplayProductExtraContent($params) {
+        return [
+            (new PrestaShop\PrestaShop\Core\Product\ProductExtraContent())
+                ->setTitle('First custom tab')
+                ->setContent('Content of the first custom tab'),
+            (new PrestaShop\PrestaShop\Core\Product\ProductExtraContent())
+                ->setTitle('Second custom tab')
+                ->setContent('Content of the second custom tab')
+        ];
+    }
+}
+```
+
+## `displayProductExtraContent` vs. `displayProductAdditionalInfo`
+
+Both hooks inject content on the product page, but they serve different purposes:
+
+| | `displayProductExtraContent` | `displayProductAdditionalInfo` |
+|---|---|---|
+| Return type | Array of `ProductExtraContent` objects | HTML string |
+| Rendered as | Additional tabs (by default) | Inline HTML block below the add-to-cart area |
+| Supports multiple blocks per module | Yes (one array, multiple objects) | No (one string) |
+| Tab title | Set on the `ProductExtraContent` object | N/A |
+| Best for | Structured supplementary content (specs, guides, reviews) | Small contextual additions near the product form |
+
+<Tip>
+Use `displayProductExtraContent` when your content is substantial enough to deserve its own labeled tab. Use `displayProductAdditionalInfo` for compact additions that should appear inline — such as badges, labels, or a single line of extra information near the buy button.
+</Tip>
+
+## Generating dynamic content
+
+The `$params` array passed to `hookDisplayProductExtraContent` contains the current product data. You can use it to generate tab content dynamically:
+
+```php
+public function hookDisplayProductExtraContent($params)
+{
+    $product = $params['product']; // Product LazyArray
+
+    $content = $this->renderTemplate('views/templates/hook/extra_tab.tpl', [
+        'product_id' => $product['id'],
+    ]);
+
+    return [
+        (new PrestaShop\PrestaShop\Core\Product\ProductExtraContent())
+            ->setTitle($this->trans('More details', [], 'Modules.DemoProductExtraContent.Config'))
+            ->setContent($content)
+            ->setClass('my-module-extra-tab'),
+    ];
+}
+```
+
+<Warning>
+The `content` string is injected as raw HTML into the tab panel. Always escape user-generated or database-sourced content before returning it, and avoid calling `renderTemplate` with unvalidated input.
+</Warning>

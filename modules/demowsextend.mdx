@@ -1,0 +1,227 @@
+---
+title: "Add a Custom ObjectModel Resource to the PrestaShop WebService"
+sidebarTitle: "WebService Extension"
+description: "Expose a custom ObjectModel entity through PrestaShop's legacy XML/JSON WebService API by implementing the addWebserviceResources hook."
+---
+
+PrestaShop has shipped a built-in REST-like WebService since version 1.4. It speaks both XML and JSON, is secured by per-client API keys, and can automatically expose any `ObjectModel` subclass as a full CRUD resource. The `demowsextend` module shows the minimum code needed to register a custom entity — an `Article` — as a first-class WebService resource, giving external tools immediate access to `GET`, `POST`, `PUT`, and `DELETE` operations on `demo_articles`.
+
+<Note>
+  PrestaShop 9 also ships a **new REST API built on API Platform** that is the recommended approach for all new integrations. The legacy WebService remains active in PS 9 for backward compatibility, but new modules should prefer the API Platform approach. See the [API Platform module guide](/modules/api-module) for details.
+</Note>
+
+## How it works
+
+### The `addWebserviceResources` hook
+
+When the WebService initialises, it fires the `addWebserviceResources` hook and collects the return values from all registered modules. Each module returns an associative array where:
+
+- The **key** becomes the URL segment (e.g. `articles` → `/api/articles`).
+- `description` is shown in the WebService documentation page.
+- `class` is the fully-qualified (or auto-loaded) class name of the `ObjectModel`.
+
+```php
+// demowsextend.php
+public function hookAddWebserviceResources($params)
+{
+    return [
+        'articles' => [
+            'description' => 'Blog articles',
+            'class' => 'Article',
+            //'forbidden_method' => array('DELETE') // optional
+        ]
+    ];
+}
+```
+
+The `forbidden_method` option lets you restrict which HTTP verbs are allowed. Uncomment and populate it if you want a read-only endpoint.
+
+The module must also **register the hook** at install time:
+
+```php
+public function install()
+{
+    return parent::install() &&
+        $this->installDB() &&
+        $this->registerHook('addWebserviceResources');
+}
+```
+
+### The `Article` ObjectModel
+
+The `Article` class extends `ObjectModel` and declares its schema in the static `$definition` array. PrestaShop's WebService layer reads this definition to build the API response automatically — no extra mapping code is required.
+
+```php
+// src/Entity/Article.php
+class Article extends ObjectModel
+{
+    public $title;
+    public $type;
+    public $content;
+    public $meta_title;
+
+    public $date_add;
+    public $date_upd;
+
+    public static $definition = [
+        'table'     => 'article',
+        'primary'   => 'id_article',
+        'multilang' => true,
+        'fields'    => [
+            'type' => [
+                'type'     => self::TYPE_STRING,
+                'validate' => 'isCleanHtml',
+                'required' => true,
+                'size'     => 255,
+            ],
+
+            // Language-specific fields
+            'title' => [
+                'type'     => self::TYPE_STRING,
+                'lang'     => true,
+                'validate' => 'isCleanHtml',
+                'required' => true,
+                'size'     => 255,
+            ],
+            'content' => [
+                'type'     => self::TYPE_HTML,
+                'lang'     => true,
+                'validate' => 'isCleanHtml',
+                'size'     => 4000,
+            ],
+            'meta_title' => [
+                'type'     => self::TYPE_STRING,
+                'lang'     => true,
+                'validate' => 'isCleanHtml',
+                'size'     => 255,
+            ],
+
+            'date_add' => ['type' => self::TYPE_DATE, 'validate' => 'isDate'],
+            'date_upd' => ['type' => self::TYPE_DATE, 'validate' => 'isDate'],
+        ],
+    ];
+
+    protected $webserviceParameters = [
+        'objectNodeName'  => 'article',
+        'objectsNodeName' => 'articles',
+        'fields' => [
+            'title'      => ['required' => true],
+            'type'       => ['required' => true],
+            'content'    => [],
+            'meta_title' => [],
+        ],
+    ];
+}
+```
+
+#### Key `$definition` concepts
+
+| Key         | Purpose                                                                              |
+|-------------|--------------------------------------------------------------------------------------|
+| `table`     | Database table name (without the `_DB_PREFIX_` prefix)                              |
+| `primary`   | Name of the primary-key column                                                       |
+| `multilang` | When `true`, a `_lang` table stores language-dependent fields per `id_lang`          |
+| `lang`      | Marks an individual field as language-dependent                                      |
+
+#### `$webserviceParameters`
+
+This protected property customises how the WebService serialises the object:
+
+- `objectNodeName` / `objectsNodeName` — the XML element names for a single item and a collection.
+- `fields` — explicitly lists which `$definition` fields are exposed through the API and whether they are required on write.
+
+### Database tables
+
+The module creates its own tables on install via raw SQL so that it stays compatible with older versions that may not support Doctrine migrations:
+
+```php
+public function installDB()
+{
+    $sql = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . Article::$definition['table'] . '` (
+        `id_article` int(10) unsigned NOT NULL AUTO_INCREMENT,
+        `type` varchar(255),
+        `date_add` datetime NOT NULL,
+        `date_upd` datetime NOT NULL,
+        PRIMARY KEY (`id_article`)
+    ) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci';
+
+    $sql_lang = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . Article::$definition['table'] . '_lang` (
+        `id_article` int(10) unsigned NOT NULL,
+        `id_lang`    int(10) unsigned NOT NULL,
+        `title`      varchar(255),
+        `content`    text NOT NULL,
+        `meta_title` varchar(255) NOT NULL,
+        PRIMARY KEY (`id_article`, `id_lang`)
+    ) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci';
+
+    return Db::getInstance()->execute($sql)
+        && Db::getInstance()->execute($sql_lang);
+}
+```
+
+## Auto-generated endpoints
+
+Once installed, the following URLs become available (replace `{id}` with the numeric article ID):
+
+| Method   | URL                        | Description               |
+|----------|----------------------------|---------------------------|
+| `GET`    | `/api/articles`            | List all articles         |
+| `GET`    | `/api/articles/{id}`       | Fetch one article         |
+| `POST`   | `/api/articles`            | Create an article         |
+| `PUT`    | `/api/articles/{id}`       | Update an article         |
+| `DELETE` | `/api/articles/{id}`       | Delete an article         |
+
+Responses are available in both **XML** (default) and **JSON** by appending `?output_format=JSON`.
+
+## Authentication
+
+Every WebService request must be authenticated with an API key. Generate a key in the Back Office under **Advanced Parameters → Webservice**, create a new key, and grant it access to the `articles` resource.
+
+Pass the key as HTTP Basic Auth where the username is the key and the password is empty:
+
+```bash
+# List articles as JSON
+curl -u "YOUR_API_KEY:" \
+     "https://your-shop.example/api/articles?output_format=JSON"
+
+# Create an article (XML body)
+curl -X POST \
+     -u "YOUR_API_KEY:" \
+     -H "Content-Type: application/xml" \
+     -d '<prestashop><article><type>news</type><title><language id="1">Hello World</language></title></article></prestashop>' \
+     "https://your-shop.example/api/articles"
+```
+
+<Warning>
+  Make sure the WebService is **enabled** in **Advanced Parameters → Webservice → Enable PrestaShop's webservice**. It is disabled by default.
+</Warning>
+
+## Installation
+
+<Steps>
+  <Step title="Copy the module">
+    Place the `demowsextend` directory inside your PrestaShop `modules/` folder. The directory name must be `demowsextend`.
+  </Step>
+  <Step title="Install the module">
+    From the Back Office **Module Manager**, search for "Extend WS demo module" and click **Install**.
+
+    Or use the CLI:
+    ```bash
+    php bin/console prestashop:module install demowsextend
+    ```
+    This runs `installDB()` (creates both tables) and registers the `addWebserviceResources` hook.
+  </Step>
+  <Step title="Enable the WebService and create a key">
+    Go to **Advanced Parameters → Webservice**, enable the WebService, then click **Add new webservice key**. Assign `GET`, `POST`, `PUT`, and `DELETE` permissions on the `articles` resource.
+  </Step>
+  <Step title="Verify the endpoint">
+    ```bash
+    curl -u "YOUR_KEY:" "https://your-shop.example/api/articles?output_format=JSON"
+    # Expected: {"articles": []}
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+  The WebService automatically handles pagination via `?limit=` and `?display=full` parameters, and supports filtering with `?filter[type]=[news]` — all powered by `ObjectModel` metadata with no additional code.
+</Tip>

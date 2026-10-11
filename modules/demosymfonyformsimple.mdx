@@ -1,0 +1,279 @@
+---
+title: "Add a Module Configuration Page with a Symfony Form"
+sidebarTitle: "Simple Config Form"
+description: "Step-by-step guide to creating a single-form module configuration page using PrestaShop's AbstractConfigurationFormDataProvider and Symfony form types."
+---
+
+The `demosymfonyformsimple` module is deliberately the smallest possible Symfony-form configuration page. It has a single text field, a single configuration key, and the minimum number of classes required to wire them together. If you are building your first PrestaShop 9 module with a configuration page, this is the right place to start — read this module, understand every file, then graduate to `demosymfonyform` when you need richer inputs.
+
+<Tip>
+This module was created by following the [official developer documentation guide](https://devdocs.prestashop-project.org/9/modules/creation/adding-configuration-page-modern/). Reading the guide alongside this module's source code is the fastest path to understanding the architecture.
+</Tip>
+
+<Note>
+Requires **PrestaShop 9.0.0 or later** and Composer.
+</Note>
+
+## The four-layer architecture
+
+Every Symfony-based configuration page in PrestaShop follows this layering:
+
+```
+DemoConfigurationFormType          ← Symfony form type (field definitions)
+        ↕
+DemoConfigurationTextFormDataProvider  ← FormDataProviderInterface (glue)
+        ↕
+DemoConfigurationTextDataConfiguration ← DataConfigurationInterface (storage)
+        ↕
+PrestaShop Configuration table     ← persistent storage
+```
+
+A PrestaShop core `Handler` service ties the form type and provider together and is what the controller receives.
+
+## The form type
+
+`DemoConfigurationFormType` extends `TranslatorAwareType` (which itself extends Symfony's `AbstractType`). It adds a single `TextType` field:
+
+```php
+// src/Form/DemoConfigurationFormType.php
+class DemoConfigurationFormType extends TranslatorAwareType
+{
+    public function buildForm(FormBuilderInterface $builder, array $options): void
+    {
+        $builder
+            ->add('config_text', TextType::class, [
+                'label' => $this->trans('Configuration text', 'Modules.DemoSymfonyFormSimple.Admin'),
+                'help'  => $this->trans('Maximum 32 characters', 'Modules.DemoSymfonyFormSimple.Admin'),
+            ]);
+    }
+
+    public function configureOptions(OptionsResolver $resolver): void
+    {
+        parent::configureOptions($resolver);
+        $resolver->setDefaults([
+            'form_theme' => '@PrestaShop/Admin/TwigTemplateForm/prestashop_ui_kit.html.twig',
+        ]);
+    }
+}
+```
+
+Setting `form_theme` to the PrestaShop UI Kit theme ensures the field renders with the correct Back Office styles without any extra template work.
+
+## The data configuration
+
+`DemoConfigurationTextDataConfiguration` handles reading from and writing to the PrestaShop `ps_configuration` database table. Importantly, `updateConfiguration()` performs validation before saving and returns a string error array — any returned errors will be shown as flash messages by the controller:
+
+```php
+// src/Form/DemoConfigurationTextDataConfiguration.php
+final class DemoConfigurationTextDataConfiguration implements DataConfigurationInterface
+{
+    public const DEMO_SYMFONY_FORM_SIMPLE_TEXT_TYPE = 'DEMO_SYMFONY_FORM_SIMPLE_TEXT_TYPE';
+    public const CONFIG_MAXLENGTH = 32;
+
+    public function getConfiguration(): array
+    {
+        return [
+            'config_text' => $this->configuration->get(static::DEMO_SYMFONY_FORM_SIMPLE_TEXT_TYPE),
+        ];
+    }
+
+    public function updateConfiguration(array $configuration): array
+    {
+        $errors = [];
+
+        if ($this->validateConfiguration($configuration)) {
+            if (strlen($configuration['config_text']) <= static::CONFIG_MAXLENGTH) {
+                $this->configuration->set(
+                    static::DEMO_SYMFONY_FORM_SIMPLE_TEXT_TYPE,
+                    $configuration['config_text']
+                );
+            } else {
+                $errors[] = 'DEMO_SYMFONY_FORM_SIMPLE_TEXT_TYPE value is too long';
+            }
+        }
+
+        return $errors;
+    }
+
+    public function validateConfiguration(array $configuration): bool
+    {
+        return isset($configuration['config_text']);
+    }
+}
+```
+
+<Note>
+`updateConfiguration()` returns an array of error strings (empty on success). This is the mechanism `FormHandlerInterface::save()` uses to surface storage-layer errors back to the controller.
+</Note>
+
+## The data provider
+
+`DemoConfigurationTextFormDataProvider` implements `FormDataProviderInterface`. It is a pure delegation layer between the handler and the data configuration:
+
+```php
+// src/Form/DemoConfigurationTextFormDataProvider.php
+class DemoConfigurationTextFormDataProvider implements FormDataProviderInterface
+{
+    public function __construct(
+        private readonly DataConfigurationInterface $demoConfigurationTextDataConfiguration
+    ) {}
+
+    public function getData(): array
+    {
+        return $this->demoConfigurationTextDataConfiguration->getConfiguration();
+    }
+
+    public function setData(array $data): array
+    {
+        return $this->demoConfigurationTextDataConfiguration->updateConfiguration($data);
+    }
+}
+```
+
+## The controller
+
+`DemoConfigurationController` extends `PrestaShopAdminController` and uses the `#[Autowire]` attribute to inject the handler by its service ID. The pattern — get form, handle request, save on valid submit, redirect — is identical to `demosymfonyform`:
+
+```php
+// src/Controller/DemoConfigurationController.php
+class DemoConfigurationController extends PrestaShopAdminController
+{
+    public function index(
+        Request $request,
+        #[Autowire(service: 'prestashop.module.demosymfonyformsimple.form.demo_configuration_text_form_data_handler')]
+        FormHandlerInterface $textFormDataHandler,
+    ): Response {
+        $textForm = $textFormDataHandler->getForm();
+        $textForm->handleRequest($request);
+
+        if ($textForm->isSubmitted() && $textForm->isValid()) {
+            $errors = $textFormDataHandler->save($textForm->getData());
+
+            if (empty($errors)) {
+                $this->addFlash('success', $this->trans('Successful update.', [], 'Admin.Notifications.Success'));
+                return $this->redirectToRoute('demo_configuration_form_simple');
+            }
+
+            $this->addFlashErrors($errors);
+        }
+
+        return $this->render('@Modules/demosymfonyformsimple/views/templates/admin/form.html.twig', [
+            'demoConfigurationForm' => $textForm->createView(),
+        ]);
+    }
+}
+```
+
+## The Twig template
+
+The template extends the standard Back Office layout and renders the form inside a Bootstrap card. `form_widget()` renders all form fields in one call — no need to render each field individually:
+
+```twig
+{# views/templates/admin/form.html.twig #}
+{% extends '@PrestaShop/Admin/layout.html.twig' %}
+
+{% block content %}
+  {{ form_start(demoConfigurationForm) }}
+  <div class="card">
+    <h3 class="card-header">
+      <i class="material-icons">settings</i>
+      {{ 'Text form types'|trans({}, 'Modules.DemoSymfonyFormSimple.Admin') }}
+    </h3>
+    <div class="card-body">
+      <div class="form-wrapper">
+        {{ form_widget(demoConfigurationForm) }}
+      </div>
+    </div>
+    <div class="card-footer">
+      <div class="d-flex justify-content-end">
+        <button class="btn btn-primary float-right" id="save-button">
+          {{ 'Save'|trans({}, 'Admin.Actions') }}
+        </button>
+      </div>
+    </div>
+  </div>
+  {{ form_end(demoConfigurationForm) }}
+{% endblock %}
+```
+
+<Tip>
+Always use `form_start()` / `form_end()` rather than a raw `<form>` tag — PrestaShop injects the CSRF token and form method attributes automatically.
+</Tip>
+
+## Service wiring
+
+The services follow the same layered pattern as the larger form module:
+
+```yaml
+# config/services.yml
+services:
+  _defaults:
+    public: true
+
+  PrestaShop\Module\DemoSymfonyFormSimple\Controller\DemoConfigurationController:
+    autowire: true
+    autoconfigure: true
+
+  prestashop.module.demosymfonyformsimple.form.type.demo_configuration_text:
+    class: 'PrestaShop\Module\DemoSymfonyFormSimple\Form\DemoConfigurationFormType'
+    parent: 'form.type.translatable.aware'
+    public: true
+    tags:
+      - { name: form.type }
+
+  prestashop.module.demosymfonyformsimple.form.demo_configuration_text_data_configuration:
+    class: PrestaShop\Module\DemoSymfonyFormSimple\Form\DemoConfigurationTextDataConfiguration
+    arguments: ['@prestashop.adapter.legacy.configuration']
+
+  prestashop.module.demosymfonyformsimple.form.demo_configuration_text_form_data_provider:
+    class: 'PrestaShop\Module\DemoSymfonyFormSimple\Form\DemoConfigurationTextFormDataProvider'
+    arguments:
+      - '@prestashop.module.demosymfonyformsimple.form.demo_configuration_text_data_configuration'
+
+  prestashop.module.demosymfonyformsimple.form.demo_configuration_text_form_data_handler:
+    class: 'PrestaShop\PrestaShop\Core\Form\Handler'
+    arguments:
+      - '@form.factory'
+      - '@prestashop.core.hook.dispatcher'
+      - '@prestashop.module.demosymfonyformsimple.form.demo_configuration_text_form_data_provider'
+      - 'PrestaShop\Module\DemoSymfonyFormSimple\Form\DemoConfigurationFormType'
+      - 'DemoConfiguration'
+```
+
+The form type service is declared with `parent: 'form.type.translatable.aware'` so it inherits the translator and locale injections provided by that parent definition.
+
+## Redirecting from `getContent()`
+
+The main module file generates the Symfony route URL and redirects Module Manager's **Configure** link to it:
+
+```php
+// demosymfonyformsimple.php
+public function getContent()
+{
+    $route = $this->get('router')->generate('demo_configuration_form_simple');
+    Tools::redirectAdmin($route);
+}
+```
+
+## Installation
+
+<Steps>
+  <Step title="Clone or download the module">
+    Place the module in your PrestaShop `modules/` directory, ensuring the folder is named `demosymfonyformsimple`.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/demosymfonyformsimple
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    Install via the Back Office Module Manager, or run:
+    ```bash
+    php bin/console prestashop:module install demosymfonyformsimple
+    ```
+  </Step>
+  <Step title="Open the configuration page">
+    Click **Configure** next to the module. You will see a single text field. Enter a value (up to 32 characters), save, and the value is persisted to the `ps_configuration` table.
+  </Step>
+</Steps>

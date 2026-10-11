@@ -1,0 +1,382 @@
+---
+title: "Create a Custom Mail Theme for PrestaShop Transactional Emails"
+sidebarTitle: "Mail Theme"
+description: "Build a custom Twig-based mail theme with dark mode support, extend existing mail layouts, and apply dynamic color transformations to PrestaShop transactional emails."
+---
+
+PrestaShop's transactional email system is built on Twig layouts. Each **theme** is a folder of Twig templates organised into sub-directories, and a module can contribute entirely new themes, add layouts to existing themes, replace specific core layouts, and transform the rendered HTML before delivery. The `example_module_mailtheme` module demonstrates all four capabilities through a `dark_modern` theme that extends the built-in `modern` theme with customised dark-mode colors, a configuration page for dynamic color settings, and a post-render color transformation.
+
+<Note>
+  This module requires **PrestaShop 9.0.0** or later. The Twig-based mail theme system was introduced in PS 1.7.6, but the module uses API patterns available from PS 9.0.0.
+</Note>
+
+## Theme directory structure
+
+```
+mails/
+├── themes/
+│   └── dark_modern/             ← complete theme scanned by FolderThemeScanner
+│       ├── components/
+│       │   ├── layout.html.twig ← base HTML skeleton
+│       │   ├── header.html.twig
+│       │   └── footer.html.twig
+│       ├── core/                ← overrides for built-in PS mail templates
+│       │   ├── order_conf.html.twig
+│       │   ├── password.html.twig
+│       │   └── ...              ← one file per core mail
+│       └── modules/             ← overrides for module mail templates
+│           └── ps_emailalerts/
+│               └── new_order.html.twig
+└── layouts/                     ← standalone layouts added to existing themes
+    ├── customized_classic_layout.html.twig
+    ├── customized_modern_layout.html.twig
+    └── customized_dark_modern_layout.html.twig
+```
+
+### Themes vs layouts
+
+| Concept | Description |
+|---|---|
+| **Theme** | A complete set of Twig templates for all core and module mails. Scanned from a folder by `FolderThemeScanner`. |
+| **Layout** | A single Twig file added to an existing theme's collection. Useful when you only need to add or replace one template. |
+| **Component** | A partial template included by layouts (header, footer, base HTML skeleton). |
+
+## The `dark_modern` theme
+
+The `dark_modern` component layout (`mails/themes/dark_modern/components/layout.html.twig`) is the base HTML skeleton shared by all emails in the theme. It uses Twig variables for colors, making the palette configurable at runtime:
+
+```twig
+{# mails/themes/dark_modern/components/layout.html.twig (excerpt) #}
+<body style="background-color:{{ primary_background_color }};">
+  <div style="background-color:{{ primary_background_color }};">
+    <div class="shadow wrapper-container"
+         style="background:{{ secondary_background_color }};
+                background-color:{{ secondary_background_color }};
+                Margin:0px auto;border-radius:4px;max-width:604px;">
+      <table ...>
+        <tbody>
+          <tr>
+            <td ...>
+              {% block header %}
+                {% include '@Modules/example_module_mailtheme/mails/themes/dark_modern/components/header.html.twig' %}
+              {% endblock %}
+
+              {% block content %}
+              {% endblock %}
+
+              {% block footer_content %}
+              {% endblock %}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    {% block footer %}
+      {% include '@Modules/example_module_mailtheme/mails/themes/dark_modern/components/footer.html.twig' %}
+    {% endblock %}
+  </div>
+</body>
+```
+
+The `{{ primary_background_color }}` and `{{ secondary_background_color }}` variables are injected at render time by the `hookActionBuildMailLayoutVariables` hook handler — described below.
+
+## Adding layouts to existing themes
+
+`customized_classic_layout.html.twig` shows how to **extend** an existing core theme layout rather than building from scratch:
+
+```twig
+{# mails/layouts/customized_classic_layout.html.twig #}
+{% extends '@MailThemes/classic/components/layout.html.twig' %}
+
+{% block content %}
+  <tr>
+    <td align="center" class="titleblock">
+      <font size="2" face="{{ languageDefaultFont }}Open-sans, sans-serif" color="#555454">
+        <span class="title">
+          {{ 'This is an example mail template from my module for classic theme'
+             |trans({}, 'EmailsBody', locale)|raw }}
+        </span>
+      </font>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" class="titleblock">
+      <font size="2" face="{{ languageDefaultFont }}Open-sans, sans-serif" color="#555454">
+        <span class="subtitle">{{ customMessage }}</span>
+      </font>
+    </td>
+  </tr>
+  <tr>
+    <td class="space_footer">&nbsp;</td>
+  </tr>
+{% endblock %}
+```
+
+This template inherits the full classic theme HTML structure and overrides only the `content` block. The `{{ customMessage }}` variable is provided by the module's `hookActionBuildMailLayoutVariables` handler. Note the `subtitle` CSS class on the `<span>` — this is the element targeted by `CustomMessageColorTransformation`.
+
+## Hook methods
+
+The module registers three hooks:
+
+| Hook constant | Purpose |
+|---|---|
+| `ThemeCatalogInterface::LIST_MAIL_THEMES_HOOK` | Add the `dark_modern` theme and custom layouts to the catalog |
+| `LayoutVariablesBuilderInterface::BUILD_MAIL_LAYOUT_VARIABLES_HOOK` | Inject runtime variables (colors, custom message) |
+| `MailTemplateRendererInterface::GET_MAIL_LAYOUT_TRANSFORMATIONS` | Add post-render HTML transformations |
+
+### `hookActionListMailThemes` — registering the theme and layouts
+
+```php
+// example_module_mailtheme.php (excerpt)
+public function hookActionListMailThemes(array $hookParams)
+{
+    if (!isset($hookParams['mailThemes'])) {
+        return;
+    }
+
+    /** @var ThemeCollectionInterface $themes */
+    $themes = $hookParams['mailThemes'];
+
+    $this->addDarkTheme($themes);        // scan and add the dark_modern theme folder
+    $this->addLayoutToCollection($themes); // add customized_template layout to classic/modern/dark_modern
+    $this->extendOrderConfLayout($themes); // replace order_conf in modern/dark_modern
+}
+```
+
+**Adding the whole theme** uses `FolderThemeScanner` to recursively discover every Twig file under `mails/themes/dark_modern`:
+
+```php
+private function addDarkTheme(ThemeCollectionInterface $themes)
+{
+    $scanner = new FolderThemeScanner();
+    $darkTheme = $scanner->scan(_PS_MODULE_DIR_ . 'example_module_mailtheme/mails/themes/dark_modern');
+    if (null !== $darkTheme && $darkTheme->getLayouts()->count() > 0) {
+        $themes->add($darkTheme);
+    }
+}
+```
+
+**Adding a standalone layout** to an existing theme:
+
+```php
+private function addLayoutToCollection(ThemeCollectionInterface $themes)
+{
+    foreach ($themes as $theme) {
+        if (!in_array($theme->getName(), ['classic', 'modern', 'dark_modern'])) {
+            continue;
+        }
+
+        $theme->getLayouts()->add(new Layout(
+            'customized_template',
+            '@Modules/example_module_mailtheme/mails/layouts/customized_' . $theme->getName() . '_layout.html.twig',
+            '',
+            $this->name
+        ));
+    }
+}
+```
+
+### `hookActionBuildMailLayoutVariables` — injecting variables
+
+```php
+public function hookActionBuildMailLayoutVariables(array $hookParams)
+{
+    if (!isset($hookParams['mailLayout'])) {
+        return;
+    }
+
+    /** @var DarkThemeSettings $darkThemeSettings */
+    $darkThemeSettings = $this->get(DarkThemeSettings::class);
+
+    /** @var LayoutInterface $mailLayout */
+    $mailLayout = $hookParams['mailLayout'];
+
+    // Inject customMessage only for this module's customized_template layout
+    if ('customized_template' === $mailLayout->getName() && $this->name === $mailLayout->getModuleName()) {
+        $hookParams['mailLayoutVariables']['customMessage'] =
+            $darkThemeSettings->getCustomMessageByLocale($hookParams['mailLayoutVariables']['locale']);
+    }
+
+    // Inject color variables for every dark_modern layout
+    if (false !== strpos($mailLayout->getHtmlPath(), 'dark_modern')) {
+        $layoutSettings = $darkThemeSettings->getSettings();
+        $hookParams['mailLayoutVariables'] = array_merge($hookParams['mailLayoutVariables'], $layoutSettings);
+    }
+}
+```
+
+The `$layoutSettings` array returned by `DarkThemeSettings::getSettings()` contains:
+
+```php
+[
+    'custom_message'              => [...],       // per-language strings
+    'primary_background_color'    => '#222222',
+    'secondary_background_color'  => '#dddddd',
+    'primary_text_color'          => '#ffffff',
+    'secondary_text_color'        => '#25B9D7',
+]
+```
+
+These keys match exactly the Twig variable names used in the layout templates.
+
+## `CustomMessageColorTransformation`
+
+The transformation class extends `AbstractTransformation` and implements `MailTemplateTransformationInterface`. It receives the fully rendered HTML string, parses it with Symfony's `DomCrawler`, and applies inline styles:
+
+```php
+// src/MailTemplate/Transformation/CustomMessageColorTransformation.php
+class CustomMessageColorTransformation extends AbstractTransformation
+{
+    /** @var string */
+    private $customColor;
+
+    public function __construct($customColor)
+    {
+        parent::__construct(MailTemplateInterface::HTML_TYPE);
+        $this->customColor = $customColor;
+    }
+
+    public function apply($templateContent, array $templateVariables)
+    {
+        $crawler = new Crawler($templateContent);
+        $customSpans = $crawler->filter('span[class="subtitle"]');
+
+        /** @var DOMElement $customSpan */
+        foreach ($customSpans as $customSpan) {
+            $customSpan->setAttribute('style', sprintf('color: %s;', $this->customColor));
+        }
+
+        return $crawler->html();
+    }
+}
+```
+
+The transformation targets `<span class="subtitle">` — the element used in `customized_*_layout.html.twig` to display the custom message — and injects an inline `color:` style. This overrides any stylesheet-based color, which is important for email clients that strip `<style>` blocks.
+
+The transformation is registered in `hookActionGetMailLayoutTransformations`:
+
+```php
+public function hookActionGetMailLayoutTransformations(array $hookParams)
+{
+    if (!isset($hookParams['templateType'])
+        || MailTemplateInterface::HTML_TYPE !== $hookParams['templateType']
+        || !isset($hookParams['mailLayout'])
+        || !isset($hookParams['layoutTransformations'])) {
+        return;
+    }
+
+    /** @var LayoutInterface $mailLayout */
+    $mailLayout = $hookParams['mailLayout'];
+    if ($mailLayout->getModuleName() != $this->name) {
+        return;
+    }
+
+    /** @var TransformationCollectionInterface $transformations */
+    $transformations = $hookParams['layoutTransformations'];
+    $transformations->add(new CustomMessageColorTransformation('#FF0000'));
+}
+```
+
+## `DarkThemeSettings` — the configuration service
+
+`DarkThemeSettings` stores the theme's color palette and the per-language custom message in PrestaShop's configuration system (the `ps_configuration` table), serialized as JSON:
+
+```php
+// src/DarkThemeSettings.php (excerpt)
+class DarkThemeSettings
+{
+    public const SETTINGS_KEY = 'EXAMPLE_MODULE_MAILTHEME_DARK_THEME_SETTINGS';
+    public const DEFAULT_CUSTOM_MESSAGE = 'My custom message';
+
+    public function getDefaultSettings(): array
+    {
+        return [
+            'custom_message'              => [...],
+            'primary_background_color'    => '#222222',
+            'secondary_background_color'  => '#dddddd',
+            'primary_text_color'          => '#ffffff',
+            'secondary_text_color'        => '#25B9D7',
+        ];
+    }
+
+    public function getSettings(): array
+    {
+        $configurationSettings = $this->configuration->get(self::SETTINGS_KEY);
+        if (empty($configurationSettings)) {
+            return $this->getDefaultSettings();
+        }
+        $settings = json_decode($configurationSettings, true);
+        return empty($settings) ? $this->getDefaultSettings() : $settings;
+    }
+
+    public function saveSettings(array $settings): void
+    {
+        $this->configuration->set(self::SETTINGS_KEY, json_encode($settings));
+    }
+}
+```
+
+## Admin configuration page
+
+`DarkThemeController` is a standard `PrestaShopAdminController` that renders a Symfony Form (`DarkThemeSettingsType`) for editing the dark theme colors and custom message. It exposes four routes defined in `config/routes.yml`:
+
+| Route name | Path | Method | Action |
+|---|---|---|---|
+| `admin_example_module_mailtheme` | `/example/module_mailtheme` | GET | Show the form |
+| `admin_example_module_mailtheme_save_settings` | `/example/module_mailtheme` | POST | Save settings |
+| `admin_example_module_mailtheme_reset_default_settings` | `/example/module_mailtheme/reset_default` | GET | Reset to defaults |
+| `admin_example_module_mailtheme_generate` | `/example/module_mailtheme/generate` | GET | Generate templates and set as default |
+
+The **Generate** action sets `PS_MAIL_THEME` to `dark_modern` and dispatches `GenerateThemeMailTemplatesCommand` for every shop language, writing the rendered HTML files to disk:
+
+```php
+public function generateAction(LangRepository $langRepository): RedirectResponse
+{
+    $this->getConfiguration()->set('PS_MAIL_THEME', 'dark_modern');
+
+    foreach ($langRepository->getMapping() as $language) {
+        $generateCommand = new GenerateThemeMailTemplatesCommand(
+            'dark_modern',
+            $language['locale'],
+            true
+        );
+        $this->dispatchCommand($generateCommand);
+    }
+    // ...
+}
+```
+
+## Installation
+
+<Steps>
+  <Step title="Copy the module">
+    Place the `example_module_mailtheme` directory inside your PrestaShop `modules/` folder. The directory name must match the module name exactly.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/example_module_mailtheme
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    From the Back Office **Module Manager**, or via CLI:
+    ```bash
+    php bin/console prestashop:module install example_module_mailtheme
+    ```
+    This registers the three mail-theme hooks and creates the admin tab under **Design → Email theme**.
+  </Step>
+  <Step title="Preview the theme">
+    Go to **Design → Email theme** in the Back Office. A new `dark_modern` theme will appear. Click **Preview** on any layout to see how it looks.
+  </Step>
+  <Step title="Configure colors">
+    Go to **Modules → Example Module Email Theme → Configure** (or navigate to the tab under **Design → Email theme**). Adjust the background and text colors, then save.
+  </Step>
+  <Step title="Generate and activate">
+    Click **Generate** in the module configuration to render all templates to disk and set `dark_modern` as the active mail theme.
+  </Step>
+</Steps>
+
+<Tip>
+  After changing colors in the configuration page, click **Generate** again to re-render all HTML files on disk with the updated variable values. Without regenerating, the previously cached files will still be used for outgoing emails.
+</Tip>

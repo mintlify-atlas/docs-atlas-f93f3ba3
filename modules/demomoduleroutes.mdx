@@ -1,0 +1,192 @@
+---
+title: "Register Custom Front-Office URLs with the ModuleRoutes Hook"
+sidebarTitle: "Module Routes"
+description: "Define SEO-friendly front-office URLs for your module's controllers using the moduleRoutes hook and PrestaShop's front controller dispatch system."
+---
+
+The `demomoduleroutes` module shows how to register custom SEO-friendly front-office URLs for a module using the `moduleRoutes` hook. Without this hook, a module's front controllers are only reachable through PrestaShop's default URL scheme (`/module/demomoduleroutes/list`). By implementing `hookModuleRoutes()`, a module can map clean human-readable paths like `/demomoduleroutes/list` and `/demomoduleroutes/show/{id}/{slug}` to its controllers, which is important for SEO and for providing stable, bookmarkable URLs.
+
+<Note>
+The `moduleRoutes` hook has been available since PrestaShop 1.5.3. This module is compatible with **PrestaShop 8.0.0 and later**.
+</Note>
+
+## Installation
+
+<Steps>
+  <Step title="Clone or download the module">
+    Place the module directory inside your PrestaShop `modules/` folder and ensure the folder is named `demomoduleroutes`.
+  </Step>
+  <Step title="Install the module">
+    Install via the Back Office Module Manager, or run:
+    ```bash
+    php bin/console prestashop:module install demomoduleroutes
+    ```
+  </Step>
+  <Step title="Enable Friendly URLs">
+    Go to **Back Office → Shop Parameters → Traffic & SEO** and enable the **Friendly URL** option. This is required for custom module routes to take effect.
+  </Step>
+  <Step title="Verify the routes">
+    Click **Configure** on the module in Module Manager. The configuration page displays ready-to-click links to both demo URLs for your installation:
+    - `yourdomain/demomoduleroutes/list`
+    - `yourdomain/demomoduleroutes/show/1/abc`
+  </Step>
+</Steps>
+
+## The `hookModuleRoutes()` return value
+
+`hookModuleRoutes()` must return an associative array where each key is a unique route identifier and each value is an array describing how to match and dispatch the URL. Here is the complete implementation from the module:
+
+```php
+// demomoduleroutes.php
+public function hookModuleRoutes()
+{
+    return [
+      'module-demomoduleroutes-list' => [
+        'rule' => 'demomoduleroutes/list',
+        'keywords' => [],
+        'controller' => 'list',
+        'params' => [
+            'fc' => 'module',
+            'module' => 'demomoduleroutes'
+        ]
+      ],
+      'module-demomoduleroutes-show' => [
+        'rule' => 'demomoduleroutes/show/{id}/{slug}',
+        'keywords' => [
+          'id' => [
+            'regexp' => '[0-9]*',
+            'param' => 'id'
+          ],
+          'slug' => [
+            'regexp' => '.*',
+            'param' => 'slug'
+          ]
+        ],
+        'controller' => 'show',
+        'params' => [
+            'fc' => 'module',
+            'module' => 'demomoduleroutes'
+        ]
+      ]
+    ];
+}
+```
+
+Each route entry contains the following keys:
+
+| Key | Type | Description |
+|---|---|---|
+| `rule` | string | The URL pattern. Curly-brace placeholders like `{id}` match URL segments and must have a corresponding entry in `keywords`. |
+| `keywords` | array | Declares each URL placeholder: `regexp` constrains what the segment matches, `param` is the query-string parameter name the value is bound to. An empty array means no placeholders. |
+| `controller` | string | The controller name — maps to the class file at `controllers/front/{controller}.php`. |
+| `params` | array | Additional query-string parameters always appended to the request. `fc=module` and `module=demomoduleroutes` tell PrestaShop to dispatch to this module's front controller. |
+
+<Tip>
+Route keys (e.g. `module-demomoduleroutes-list`) must be unique across all installed modules. Using the pattern `module-{modulename}-{routename}` avoids collisions.
+</Tip>
+
+## Registering the hook
+
+The hook is registered in `install()`:
+
+```php
+// demomoduleroutes.php
+public function install()
+{
+    return parent::install() && $this->registerHook('moduleRoutes');
+}
+```
+
+## Front controller class structure
+
+PrestaShop front controllers in a module follow a strict naming convention. The class name must be:
+
+```
+{ModuleNamePascalCase}{ControllerNamePascalCase}ModuleFrontController
+```
+
+For the `list` controller of `demomoduleroutes`:
+
+```php
+// controllers/front/list.php
+class DemoModuleRoutesListModuleFrontController extends ModuleFrontController
+{
+    public function initContent()
+    {
+        parent::initContent();
+
+        $this->setTemplate('module:demomoduleroutes/views/templates/front/list.tpl');
+    }
+}
+```
+
+The `show` controller also assigns the URL parameters from the request to Smarty:
+
+```php
+// controllers/front/show.php
+class DemoModuleRoutesShowModuleFrontController extends ModuleFrontController
+{
+    public function initContent()
+    {
+        parent::initContent();
+
+        $this->context->smarty->assign(
+            // remember that it's just a demo module, always sanitize the input data!
+            [
+              'id' => Tools::getValue('id'),
+              'slug' => Tools::getValue('slug')
+            ]
+        );
+        
+        $this->setTemplate('module:demomoduleroutes/views/templates/front/show.tpl');
+    }
+}
+```
+
+<Warning>
+`Tools::getValue()` returns raw request data. In a production module, always validate and sanitize `id` (e.g. cast to `int`) and escape `slug` before using it in any query or output.
+</Warning>
+
+## Smarty templates
+
+The templates follow the standard PrestaShop front-office Smarty structure, extending the active theme layout and filling the `content` block.
+
+**`views/templates/front/list.tpl`** — lists the available items and links to the show page:
+
+```smarty
+{extends file="$layout"}
+
+{block name='content'}
+  <section id="demomoduleroutes-list">
+    <p>{l s='List controller is working.' mod='demomoduleroutes'}</p>
+    <p><a href="{url entity='module' name='demomoduleroutes' controller='show' params=['id' => 1, 'slug' => 'abc']}">{l s='Go to show page (id=1, slug=abc)' mod='demomoduleroutes'}</a></p>
+  </section>
+{/block}
+```
+
+**`views/templates/front/show.tpl`** — displays the URL parameters echoed back from the controller:
+
+```smarty
+{extends file="$layout"}
+
+{block name='content'}
+  <section id="demomoduleroutes-show">
+    <p>{l s='Show controller is working. ID:' mod='demomoduleroutes'} {$id|intval}, {l s='slug:' mod='demomoduleroutes'} {$slug|escape:'html':'UTF-8'}</p>
+    <p><a href="{url entity='module' name='demomoduleroutes' controller='list'}">{l s='Back to list' mod='demomoduleroutes'}</a></p>
+  </section>
+{/block}
+```
+
+The Smarty `{url}` function generates URLs for module controllers using the same route system. When Friendly URLs are enabled it produces the clean `/demomoduleroutes/show/1/abc` form; when disabled it falls back to the default query-string form.
+
+## SEO-friendly routes vs. default URLs
+
+| | Default URL | Module route URL |
+|---|---|---|
+| Format | `/module/demomoduleroutes/list` | `/demomoduleroutes/list` |
+| Requires Friendly URLs | No | Yes |
+| SEO-friendly | No | Yes |
+| Parameters passed | Via query string | Via URL path segments or query string |
+| Configuration needed | None | `hookModuleRoutes()` + hook registration |
+
+The default URL scheme always works regardless of Friendly URL settings and requires no additional code. Module routes require the `moduleRoutes` hook and the Friendly URL feature to be active, but produce much cleaner, bookmarkable URLs.

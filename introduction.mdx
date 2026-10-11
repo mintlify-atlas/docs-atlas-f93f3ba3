@@ -1,0 +1,88 @@
+---
+title: "PrestaShop Example Modules: Official Reference Collection"
+sidebarTitle: "Introduction"
+description: "Learn what the PrestaShop Example Modules collection is, who it's for, and how each module demonstrates a different extensibility pattern."
+---
+
+The PrestaShop Example Modules repository is a curated set of **26 official reference modules** built and maintained by PrestaShop SA. Each module is a self-contained, working demonstration of a specific extensibility pattern available in PrestaShop 9 — from Symfony controllers and Doctrine ORM entities to API Platform resources, Grid components, CQRS patterns, and hook integrations. Rather than wading through the core source code or piecing together documentation fragments, you can clone a single module, run it, and read real production-quality PHP that shows exactly how the framework is meant to be extended.
+
+## Who Is This For?
+
+The collection is aimed at **module developers** who are building on PrestaShop 9 and want authoritative, runnable examples rather than abstract explanations. You will benefit most from these modules if you are:
+
+- Writing your first Symfony-based Back Office page and need to understand controller registration, routing, and tab wiring.
+- Adding a configuration form and want to see how PrestaShop's form types, data providers, and data handlers fit together.
+- Persisting custom data with Doctrine ORM and need a complete entity → repository → installer example.
+- Exploring the new REST API layer introduced in PrestaShop 9 and want to see how a module can declare or modify API resources.
+- Integrating with an existing core Grid (product list, order list, etc.) to add columns, filters, or row actions.
+
+## How to Use This Collection
+
+The intended workflow is simple: **find the module that matches the pattern you need, study it, then copy the pattern into your own module.**
+
+Every module in the collection is intentionally minimal. Each one isolates a single concern so that nothing gets in the way of understanding the pattern being demonstrated. You are not expected to use the exact file layout or namespace conventions shown — these are reference implementations, not mandatory scaffolding.
+
+<Note>
+The file structure, namespace conventions, and service naming patterns shown in these example modules are chosen for clarity and consistency within the collection. They are **not mandatory** for your own modules. PrestaShop imposes very few structural requirements; the examples reflect one clean way to organise code, not the only way.
+</Note>
+
+The general workflow for any module in the collection is:
+
+1. Identify the pattern you need from the table below.
+2. Clone or download only that module's directory.
+3. Read the main PHP file, `config/services.yml`, and the `src/` tree to understand how the pieces connect.
+4. Adapt the pattern — rename namespaces, replace the domain logic, and wire it into your own module.
+
+## Compatibility
+
+The `master` branch of the repository targets **PrestaShop 9.0.0 and above**. All modules listed here with a minimum version of `v9.0.0` or higher are maintained on `master`. If you are working with an older PrestaShop installation, the [8.x branch](https://github.com/PrestaShop/example-modules/tree/8.x) contains versions compatible with PrestaShop 8.
+
+## Module Reference
+
+The table below lists every module in the collection, what it demonstrates, and the minimum PrestaShop version required to run it.
+
+| Module | Description | Min Version |
+|--------|-------------|-------------|
+| `api_module` | Demonstrates how to modify PrestaShop's new REST API. | v9.0.0 |
+| `dashexample` | Integrates with the migrated Symfony dashboard page through dedicated hooks, including charts rendered with the core-provided Chart.js. | v9.2.0 |
+| `demo_grid` | Demonstrates how to use the Grid component in PrestaShop. | v9.0.0 |
+| `democonsolecommand` | Shows how to implement a Symfony console command inside a module. | v9.0.0 |
+| `democontrollertabs` | Demonstrates creating modern Symfony controllers and associating Back Office tabs with them. | v9.0.0 |
+| `demodoctrine` | Demonstrates how to use Doctrine ORM entities, repositories, and migrations in PrestaShop 9. | v9.0.0 |
+| `demoextendgrid` | Demonstrates how to insert an additional row action into an existing core Grid and register JavaScript in an admin controller. | v9.0.0 |
+| `demoextendsymfonyform1` | Demonstrates how to use identifiable object hooks and Grid hooks. | v9.0.0 |
+| `demoextendsymfonyform2` | Demonstrates how to insert an upload image field inside the Symfony form for "Edit a Supplier" and manage the database state with Doctrine ORM. | v9.0.0 |
+| `demoextendsymfonyform3` | Demonstrates the CQRS pattern and the hooks that integrate with it. | v9.0.0 |
+| `demoextendtemplates` | Explains various template extendability options available to modules. | v9.1.0 |
+| `demofiltermodules` | Demonstrates how to filter the list of modules executed for a given hook based on module name. | v8.2.1 |
+| `demoformdataproviders` | Illustrates the `FormDataProviderData` and `FormDataProviderDefaultData` hooks. | v8.0.0 |
+| `demojsrouting` | Demonstrates how to use the JavaScript Router component in a module. | v9.0.0 |
+| `demomoduleroutes` | Demonstrates using the `moduleRoutes` hook to declare custom front-office routes. | v8.0.0 |
+| `demomultistoreform` | Demonstrates how to make module forms multistore-compatible in a CRUD context. | v1.7.8 |
+| `demooldproductpagehooks` | Illustrates hooks on the legacy product page. Available on the `8.x` branch only. | v1.7.8 |
+| `demooverrideobjectmodel` | Shows how to override an ObjectModel (manufacturer) and add a custom database field. | v9.0.0 |
+| `demoproductextracontent` | Adds extra content to the product page on the front office using hooks. | v1.7.0 |
+| `demoproductform` | Explains various extensibility options in the product page form. | v9.0.0 |
+| `demoseo` | Demonstrates how to alter SEO-related data using the `actionFrontControllerSetVariables` hook. | v9.2.0 |
+| `demosymfonyform` | Demonstrates how to use existing PrestaShop Symfony form types inside a new Back Office page. | v9.0.0 |
+| `demosymfonyformsimple` | Shows how to use Symfony form types to create a simple configuration page for a module. | v9.0.0 |
+| `demovieworderhooks` | Demonstrates how to use the hooks introduced with the new "View an Order" Back Office page. | v9.0.0 |
+| `demowsextend` | Adds an ObjectModel-managed resource to the PrestaShop WebService (REST API v1). | v1.7.8 |
+| `example_module_mailtheme` | Demonstrates how to add a custom mail theme to PrestaShop. | v9.0.0 |
+
+## Where to Go Next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install your first example module in four steps and understand the file layout, install lifecycle, and Symfony service wiring.
+  </Card>
+  <Card title="Module Structure" icon="folder-tree" href="/concepts/module-structure">
+    Understand the conventions shared by every module in the collection: directory layout, autoloading, and configuration files.
+  </Card>
+  <Card title="Hooks" icon="link" href="/concepts/hooks">
+    Learn how modules subscribe to PrestaShop's hook system to extend the Back Office, front office, and data layer without modifying core code.
+  </Card>
+  <Card title="democontrollertabs" icon="window" href="/modules/democontrollertabs">
+    Explore the canonical example for adding a Symfony controller with a Back Office tab — the most common starting point for new admin pages.
+  </Card>
+</CardGroup>

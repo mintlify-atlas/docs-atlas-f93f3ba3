@@ -1,0 +1,227 @@
+---
+title: "Use the JavaScript Router Component in Admin Module Pages"
+sidebarTitle: "JS Routing"
+description: "Access PrestaShop's global JavaScript Router to generate controller URLs dynamically in your module's admin JavaScript without hardcoding paths."
+---
+
+The `demojsrouting` module demonstrates how to use PrestaShop's global JavaScript `Router` component in a module admin page. Rather than hardcoding controller URLs in JavaScript — which breaks when the shop is installed in a subdirectory or when the URL structure changes — the module calls `window.prestashop.instance.router.generate('route_name')` to resolve the correct URL at runtime. The demo page uses the router to call the core customer search endpoint and renders the results in a table without a full page reload.
+
+<Note>
+This module requires **PrestaShop 9.0.0 or later** and Composer to install its autoloader.
+</Note>
+
+## Installation
+
+<Steps>
+  <Step title="Clone or download the module">
+    Place the module directory inside your PrestaShop `modules/` folder and ensure the folder is named `demojsrouting`.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/demojsrouting
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    Install via the Back Office Module Manager, or run:
+    ```bash
+    php bin/console prestashop:module install demojsrouting
+    ```
+    After installation the module appears under **Configure** in the Back Office sidebar.
+  </Step>
+</Steps>
+
+## What the JavaScript Router is
+
+The JavaScript `Router` is a PrestaShop global component that mirrors the Symfony router on the client side. PrestaShop exposes admin route names and their URL patterns to the browser, so JavaScript can generate a correct absolute URL for any named Symfony route without knowing the base path or query token at build time.
+
+In PrestaShop 9 the router is initialized through the component system:
+
+```javascript
+// Initialize the Router component
+if (typeof window.prestashop.component !== 'undefined') {
+  window.prestashop.component.initComponents(['Router']);
+}
+```
+
+After initialization, generate a URL by passing the route name:
+
+```javascript
+route = window.prestashop.instance.router.generate('admin_customers_search');
+```
+
+## Exposing your route to the JS Router
+
+Any Symfony route declared in a module's `config/routes.yml` is automatically available to the JavaScript router once the module page loads. The demo module's own route is defined as:
+
+```yaml
+# config/routes.yml
+demo_page_index:
+    path: demo-page/
+    methods: [GET]
+    defaults:
+        _controller: PrestaShop\Module\DemoJsRouting\Controller\DemoPageController::indexAction
+        _legacy_controller: 'DemoPageController'
+        _legacy_link: 'DemoPageController'
+```
+
+The `_legacy_controller` and `_legacy_link` defaults connect the Symfony route back to PrestaShop's legacy tab system and allow `getAdminLink('DemoPageController')` to resolve to the correct URL.
+
+## The `DemoPageController`
+
+The controller renders the admin page template. It extends `PrestaShopAdminController` and requires no special setup beyond a render call:
+
+```php
+// src/Controller/DemoPageController.php
+namespace PrestaShop\Module\DemoJsRouting\Controller;
+
+use PrestaShopBundle\Controller\Admin\PrestaShopAdminController;
+use Symfony\Component\HttpFoundation\Response;
+
+class DemoPageController extends PrestaShopAdminController
+{
+    public function indexAction(): Response
+    {
+        return $this->render('@Modules/demojsrouting/views/templates/admin/demo_page.html.twig');
+    }
+}
+```
+
+The module registers the controller as a Back Office tab in the module constructor so it appears under the **Configure** menu:
+
+```php
+// demojsrouting.php
+public $tabs = [
+    [
+        'class_name' => 'DemoPageController',
+        'visible' => true,
+        'name' => 'Demo page',
+        'parent_class_name' => 'CONFIGURE',
+    ],
+];
+```
+
+## The Twig template
+
+The template extends the standard admin layout and renders a search form. The JavaScript file is included in the `javascripts` block:
+
+```twig
+{# views/templates/admin/demo_page.html.twig #}
+{% extends '@PrestaShop/Admin/layout.html.twig' %}
+
+{% block content %}
+  <div class="card">
+    <div class="card-header">
+      <h3 class="card-header-title">Demo JS Routing</h3>
+    </div>
+    <div class="card-body">
+      <div class="form-group">
+        <label for="demo_js_routing">Search for customer</label>
+        <input type="text" id="demo_search_customer" class="form-control">
+      </div>
+      <div class="form-group">
+        <button type="button" id="demo_search_customer_btn" class="btn btn-primary">Search</button>
+      </div>
+
+      <div id="info-block" class="d-none"></div>
+      <div id="customers-results" class="d-none">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Email</th>
+              <th>Fullname</th>
+            </tr>
+          </thead>
+          <tbody>
+          </tbody>
+        </table>
+      </div><!-- #customers-results -->
+    </div><!-- .card-body -->
+  <div><!-- .card -->
+{% endblock %}
+
+{% block javascripts %}
+  {{ parent() }}
+  <script src="{{ asset('../modules/demojsrouting/views/js/demo-page.js') }}"></script>
+{% endblock %}
+```
+
+## The JavaScript implementation
+
+`demo-page.js` initializes the Router, then on button click calls `search()`, which uses `router.generate()` to obtain the correct URL for `admin_customers_search`. It also includes a fallback for environments where the component system is unavailable:
+
+```javascript
+// views/js/demo-page.js
+$(() => {
+  // initialize the Router component in PS 1.7.8+ 
+  if (typeof window.prestashop.component !== 'undefined') { window.prestashop.component.initComponents(['Router']); }
+ 
+  // initiate the search on button click
+  $(document).on('click', '#demo_search_customer_btn', () => search($('#demo_search_customer').val()));
+
+  /**
+   * Performs ajax request to search for customers by search phrase
+   *
+   * @param searchPhrase
+   */
+  function search(searchPhrase) {
+    var route;
+    var getParams = {'customer_search': searchPhrase};
+    
+    if (typeof window.prestashop.component !== 'undefined') {
+      // use the router component to generate the existing route in PS 1.7.8+
+      route = window.prestashop.instance.router.generate('admin_customers_search');
+    } else {
+      // use pure JS functions and bare PS search route if component is unavailable
+      const locationSearch = new URLSearchParams(window.location.search);
+      const locationPathname = window.location.pathname.split('/');
+      
+      for (const param of locationSearch) {
+        if (param[0] === '_token') getParams[param[0]] = param[1];
+      }
+      route = `${locationPathname[0]}/${locationPathname[1]}/sell/customers/search`;
+	}
+    
+    // use the ajax request to get customers
+    $.get(route, getParams
+      // render the customers
+    ).then((data) => renderResults(data));
+  }
+
+  /**
+     * Renders the results block
+     *
+     * @param {Object} data
+     */
+  function renderResults(data) {
+    var $infoBlock = $('#info-block')
+    $infoBlock.addClass('d-none').empty();
+    var $resultsBlock = $('#customers-results');
+    var $resultsBody = $('#customers-results tbody');
+
+    if (data.found === false) {
+      $infoBlock.text('No customers found').removeClass('d-none');
+      $resultsBlock.addClass('d-none');
+      $resultsBody.empty();
+
+      return;
+    }
+
+    $resultsBlock.removeClass('d-none');
+    $resultsBody.empty();
+
+    for (const id in data.customers) {
+      const customer = data.customers[id];
+      $resultsBody.append(`<tr><td>${customer.email}</td><td>${customer.firstname} ${customer.lastname}</td></tr>`);
+    }
+  }
+});
+```
+
+<Tip>
+The fallback branch (the `else` clause) constructs the URL manually by reading the current path and appending the CSRF `_token` from the query string. This is a safety net for older PrestaShop versions where `window.prestashop.component` is not available. In a module targeting only PS 9.0+, the fallback can be omitted.
+</Tip>
+
+<Warning>
+`window.prestashop.instance.router.generate()` only resolves route names that the Back Office has registered. It cannot generate front-office URLs, and it will throw an error if called with an unknown route name.
+</Warning>

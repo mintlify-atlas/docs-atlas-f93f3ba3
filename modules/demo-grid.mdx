@@ -1,0 +1,321 @@
+---
+title: "Build a Custom Admin Data Grid with PrestaShop's Grid Component"
+sidebarTitle: "Grid Component"
+description: "Implement a fully functional admin data grid using PrestaShop's Grid component: define columns, filters, bulk actions, and wire up a DBAL query builder."
+---
+
+The `demo_grid` module shows how to build a production-quality admin data grid using PrestaShop's built-in Grid component. The grid displays the store's product catalog with sortable columns, per-column text and range filters, pagination, and row actions — all without writing a single line of HTML for the table itself. Understanding this module is the prerequisite for any admin page that needs to list and filter data in PrestaShop 9.
+
+<Note>
+Requires **PrestaShop 9.0.0 or later** and Composer.
+</Note>
+
+## Architecture overview
+
+The Grid component is built from four collaborating pieces:
+
+```
+GridDefinitionFactory   ← defines columns, filters, bulk actions (structure)
+        ↓
+ProductQueryBuilder     ← DBAL queries that fetch and count rows (data)
+        ↓
+ProductFilters          ← default sort/pagination + filter type mapping
+        ↓
+IndexController         ← injects GridFactory, renders the Twig template
+```
+
+The core `GridFactory` service assembles them at request time and produces a `GridInterface` object that the controller passes to Twig.
+
+## Grid definition: columns and filters
+
+`ProductGridDefinitionFactory` extends `AbstractGridDefinitionFactory` and must implement `getId()`, `getName()`, `getColumns()`, and `getFilters()`.
+
+### Columns
+
+Columns are added to a `ColumnCollection`. `DataColumn` renders a plain cell value; `ActionColumn` is the placeholder for row action buttons:
+
+```php
+// src/Grid/Definition/Factory/ProductGridDefinitionFactory.php
+protected function getColumns()
+{
+    return (new ColumnCollection())
+        ->add(
+            (new DataColumn('id_product'))
+                ->setOptions(['field' => 'id_product'])
+        )
+        ->add(
+            (new DataColumn('name'))
+                ->setName($this->trans('Name', [], 'Modules.Demogrid.Admin'))
+                ->setOptions(['field' => 'name'])
+        )
+        ->add(
+            (new DataColumn('price_tax_excluded'))
+                ->setName($this->trans('Price', [], 'Modules.Demogrid.Admin'))
+                ->setOptions(['field' => 'price_tax_excluded'])
+        )
+        ->add(
+            (new DataColumn('reference'))
+                ->setName($this->trans('Reference', [], 'Modules.Demogrid.Admin'))
+                ->setOptions(['field' => 'reference'])
+        )
+        ->add(
+            (new DataColumn('active'))
+                ->setName($this->trans('Active', [], 'Modules.Demogrid.Admin'))
+                ->setOptions(['field' => 'active'])
+        )
+        ->add(
+            (new ActionColumn('actions'))
+                ->setName($this->trans('Actions', [], 'Admin.Actions'))
+        );
+}
+```
+
+### Filters
+
+Filters are declared with the `Filter` class and linked to a column by `setAssociatedColumn()`. PrestaShop provides `NumberMinMaxFilterType` for range inputs and `SearchAndResetType` for the search/reset buttons row:
+
+```php
+protected function getFilters()
+{
+    return (new FilterCollection())
+        ->add(
+            (new Filter('id_product', TextType::class))
+                ->setTypeOptions(['required' => false, 'attr' => ['placeholder' => $this->trans('ID', [], 'Admin.Global')]])
+                ->setAssociatedColumn('id_product')
+        )
+        ->add(
+            (new Filter('name', TextType::class))
+                ->setTypeOptions(['required' => false, 'attr' => ['placeholder' => $this->trans('Name', [], 'Admin.Global')]])
+                ->setAssociatedColumn('name')
+        )
+        ->add(
+            (new Filter('price_tax_excluded', NumberMinMaxFilterType::class, [
+                'min_field_options' => ['attr' => ['placeholder' => $this->trans('Min', [], 'Admin.Global')]],
+                'max_field_options' => ['attr' => ['placeholder' => $this->trans('Max', [], 'Admin.Global')]],
+            ]))
+                ->setAssociatedColumn('price_tax_excluded')
+        )
+        ->add(
+            (new Filter('actions', SearchAndResetType::class))
+                ->setTypeOptions([
+                    'reset_route' => 'admin_common_reset_search_by_filter_id',
+                    'reset_route_params' => ['filterId' => self::GRID_ID],
+                    'redirect_route' => 'demo_grid_index',
+                ])
+                ->setAssociatedColumn('actions')
+        );
+}
+```
+
+## Query builder: DBAL queries
+
+`ProductQueryBuilder` extends `AbstractDoctrineQueryBuilder` and implements two methods: `getSearchQueryBuilder()` (returns paginated rows) and `getCountQueryBuilder()` (returns the total row count for pagination).
+
+The private `getQueryBuilder()` method builds the base query shared by both and applies filter values:
+
+```php
+// src/Grid/Query/ProductQueryBuilder.php
+public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria): QueryBuilder
+{
+    $qb = $this->getQueryBuilder($searchCriteria->getFilters());
+    $qb
+        ->select('p.`id_product`, p.`reference`')
+        ->addSelect('ps.`price` AS `price_tax_excluded`, ps.`active`')
+        ->addSelect('pl.`name`, pl.`link_rewrite`')
+        ->addSelect('cl.`name` AS `category`')
+        ->addSelect('img_shop.`id_image`');
+
+    $this->searchCriteriaApplicator
+        ->applyPagination($searchCriteria, $qb)
+        ->applySorting($searchCriteria, $qb);
+
+    return $qb;
+}
+
+public function getCountQueryBuilder(SearchCriteriaInterface $searchCriteria): QueryBuilder
+{
+    $qb = $this->getQueryBuilder($searchCriteria->getFilters());
+    $qb->select('COUNT(p.`id_product`)');
+    return $qb;
+}
+```
+
+The base query joins `product`, `product_shop`, `product_lang`, `category_lang`, and `image_shop`, and applies text/range filters dynamically:
+
+```php
+private function getQueryBuilder(array $filterValues): QueryBuilder
+{
+    $qb = $this->connection
+        ->createQueryBuilder()
+        ->from($this->dbPrefix . 'product', 'p')
+        ->innerJoin('p', $this->dbPrefix . 'product_shop', 'ps',
+            'ps.`id_product` = p.`id_product` AND ps.`id_shop` = :id_shop')
+        ->leftJoin('p', $this->dbPrefix . 'product_lang', 'pl',
+            'pl.`id_product` = p.`id_product` AND pl.`id_lang` = :id_lang AND pl.`id_shop` = :id_shop')
+        // ...more joins...
+        ->andWhere('p.`state`=1');
+
+    // SqlFilters handle id_product (strict match) and price (min/max range)
+    $sqlFilters = new SqlFilters();
+    $sqlFilters
+        ->addFilter('id_product', 'p.`id_product`', SqlFilters::WHERE_STRICT)
+        ->addFilter('price_tax_excluded', 'ps.`price`', SqlFilters::MIN_MAX);
+    $this->filterApplicator->apply($qb, $sqlFilters, $filterValues);
+
+    $qb->setParameter('id_shop', $this->shopContext->getId());
+    $qb->setParameter('id_lang', $this->languageContext->getId());
+
+    // Manual LIKE filters for text columns
+    foreach ($filterValues as $filterName => $filter) {
+        if ('name' === $filterName) {
+            $qb->andWhere('pl.`name` LIKE :name');
+            $qb->setParameter('name', '%' . $filter . '%');
+        }
+        if ('reference' === $filterName) {
+            $qb->andWhere('p.`reference` LIKE :reference');
+            $qb->setParameter('reference', '%' . $filter . '%');
+        }
+        if ('active' === $filterName) {
+            $qb->andWhere('ps.`active` = :active');
+            $qb->setParameter('active', $filter);
+        }
+    }
+
+    return $qb;
+}
+```
+
+<Tip>
+Use `SqlFilters` with `WHERE_STRICT` or `MIN_MAX` for standard equality and range filters. Apply LIKE-based text search manually after `filterApplicator->apply()` for full control over each column.
+</Tip>
+
+## Filters class: defaults and filter ID
+
+`ProductFilters` extends the PrestaShop `Filters` base class. Its only job is to declare the default sort state and to set the `$filterId` to the same constant used in the definition factory:
+
+```php
+// src/Grid/Filters/ProductFilters.php
+class ProductFilters extends Filters
+{
+    protected $filterId = ProductGridDefinitionFactory::GRID_ID;
+
+    public static function getDefaults(): array
+    {
+        return [
+            'limit'     => 10,
+            'offset'    => 0,
+            'orderBy'   => 'id_product',
+            'sortOrder' => 'asc',
+            'filters'   => [],
+        ];
+    }
+}
+```
+
+The `filterId` ties the filter state stored in the session to this specific grid. PrestaShop automatically resolves `ProductFilters` from the session when it is type-hinted in a controller action.
+
+## Controller
+
+`IndexController` uses type-hinted method injection for `ProductFilters` (resolved from session) and `GridFactoryInterface` (injected by service ID via `#[Autowire]`):
+
+```php
+// src/Controller/Admin/IndexController.php
+class IndexController extends PrestaShopAdminController
+{
+    public function indexAction(
+        ProductFilters $filters,
+        #[Autowire(service: 'demo_grid.grid.factory.products')]
+        GridFactoryInterface $productGridFactory,
+    ): Response {
+        $quoteGrid = $productGridFactory->getGrid($filters);
+
+        return $this->render(
+            '@Modules/demo_grid/views/templates/admin/index.html.twig',
+            [
+                'enableSidebar'  => true,
+                'layoutTitle'    => $this->trans('Product listing', [], 'Modules.Demogrid.Admin'),
+                'quoteGrid'      => $this->presentGrid($quoteGrid),
+            ]
+        );
+    }
+
+    public function searchAction(
+        Request $request,
+        ProductGridDefinitionFactory $productGridDefinitionFactory,
+    ): RedirectResponse {
+        return $this->buildSearchResponse(
+            $productGridDefinitionFactory,
+            $request,
+            ProductGridDefinitionFactory::GRID_ID,
+            'demo_grid_index'
+        );
+    }
+}
+```
+
+`presentGrid()` converts the `GridInterface` to a plain array that Twig can consume with the `{% include '@PrestaShop/Admin/Common/Grid/grid_panel.html.twig' %}` partial.
+
+`buildSearchResponse()` persists filter values to the session and redirects back to the index — this is the standard search form handler pattern.
+
+## Service wiring
+
+```yaml
+# config/services.yml
+services:
+  Module\DemoGrid\Controller\Admin\IndexController:
+    autoconfigure: true
+    autowire: true
+
+  Module\DemoGrid\Grid\Definition\Factory\ProductGridDefinitionFactory:
+    parent: 'prestashop.core.grid.definition.factory.abstract_grid_definition'
+
+  Module\DemoGrid\Grid\Query\ProductQueryBuilder:
+    parent: 'prestashop.core.grid.abstract_query_builder'
+    autowire: true
+
+  demo_grid.grid.data_provider.products:
+    class: '%prestashop.core.grid.data.factory.doctrine_grid_data_factory%'
+    arguments:
+      - '@Module\DemoGrid\Grid\Query\ProductQueryBuilder'
+      - '@prestashop.core.hook.dispatcher'
+      - '@prestashop.core.grid.query.doctrine_query_parser'
+      - 'product'
+
+  demo_grid.grid.factory.products:
+    class: 'PrestaShop\PrestaShop\Core\Grid\GridFactory'
+    public: true
+    arguments:
+      - '@Module\DemoGrid\Grid\Definition\Factory\ProductGridDefinitionFactory'
+      - '@demo_grid.grid.data_provider.products'
+      - '@prestashop.core.grid.filter.form_factory'
+      - '@prestashop.core.hook.dispatcher'
+```
+
+Key points:
+- `ProductGridDefinitionFactory` inherits from `prestashop.core.grid.definition.factory.abstract_grid_definition`, which provides the `trans()` method and other shared setup.
+- `ProductQueryBuilder` inherits from `prestashop.core.grid.abstract_query_builder`, which provides the `$connection` and `$dbPrefix` properties.
+- The `doctrine_grid_data_factory` class name is read from a container parameter (`%prestashop.core.grid.data.factory.doctrine_grid_data_factory%`).
+- The `demo_grid.grid.factory.products` service is declared `public: true` so it can be referenced in `#[Autowire]`.
+
+## Installation
+
+<Steps>
+  <Step title="Clone or download the module">
+    Place the module in your PrestaShop `modules/` directory, ensuring the folder is named `demo_grid`.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/demo_grid
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    Install via the Back Office Module Manager, or run:
+    ```bash
+    php bin/console prestashop:module install demo_grid
+    ```
+  </Step>
+  <Step title="Open the module configuration page">
+    Click **Configure** next to the module. The grid will display your store's products with sortable columns and filterable rows.
+  </Step>
+</Steps>

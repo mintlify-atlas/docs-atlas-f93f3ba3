@@ -1,0 +1,139 @@
+---
+title: "Filter Which Modules Execute for a Given Hook"
+sidebarTitle: "Filter Modules"
+description: "Use the filterHookModuleList hook to selectively exclude specific modules from executing for a hook, controlling which modules contribute to a page's output."
+---
+
+By default, every module that registers for a hook is executed whenever that hook fires — PrestaShop calls them all in priority order. In some scenarios you need finer control: disable a competing module's output on specific pages, implement A/B testing by routing different visitors to different module sets, or suppress a sidebar widget on the checkout funnel without fully unregistering the module.
+
+PrestaShop 8.2.1 introduced `HookModuleFilterInterface`, which lets a module inject a **filter service** that intercepts the list of modules about to run for any hook and returns a modified list. The `demofiltermodules` module demonstrates this pattern with two concrete examples:
+
+1. Remove `ps_linklist` from the `displayFooter` hook on every front-office page.
+2. Additionally remove `ps_contactinfo` and `ps_customeraccountlinks` from `displayFooter` when the visitor is on the contact page.
+
+<Note>
+  This feature requires **PrestaShop 8.2.1 or later**. The module declares `'min' => '8.2.1'` in its `ps_versions_compliancy`.
+</Note>
+
+## How it works
+
+### `HookModuleFilterInterface`
+
+Any service that implements `PrestaShop\PrestaShop\Core\Hook\HookModuleFilterInterface` and is tagged with `core.hook_module_exec_filter` will be called every time PrestaShop resolves the list of modules for a hook. The interface requires a single method:
+
+```php
+public function filterHookModuleExecList(array $modules, string $hookName): array;
+```
+
+- `$modules` — the full list of modules registered for `$hookName`, each entry is an associative array containing at least the `module` key (the module name).
+- `$hookName` — the hook currently being dispatched (e.g. `displayFooter`).
+- Return the filtered array. You can `unset()` entries or completely replace the array.
+
+### `CustomModuleList` service
+
+```php
+// src/Service/CustomModuleList.php
+namespace Module\DemoFilterModules\Service;
+
+use PrestaShop\PrestaShop\Core\Hook\HookModuleFilterInterface;
+
+class CustomModuleList implements HookModuleFilterInterface
+{
+    public function filterHookModuleExecList(array $modules, string $hookName): array
+    {
+        // Skip the check in the back office
+        if (defined('_PS_ADMIN_DIR_')) {
+            return $modules;
+        }
+
+        if ($hookName == 'displayFooter') {
+            foreach ($modules as $index => $module) {
+                if ($module['module'] == 'ps_linklist') {
+                    unset($modules[$index]);
+                }
+
+                if (\Tools::getValue('controller') == 'contact') {
+                    if ($module['module'] == 'ps_contactinfo' || $module['module'] == 'ps_customeraccountlinks') {
+                        unset($modules[$index]);
+                    }
+                }
+            }
+        }
+
+        return $modules;
+    }
+}
+```
+
+Key points in this implementation:
+
+- **Back-office guard** — `defined('_PS_ADMIN_DIR_')` ensures the filter only applies in the front office. Without this check, the filter would also fire in the Back Office, potentially hiding modules from admin hook views.
+- **Hook targeting** — the `if ($hookName == 'displayFooter')` check means this filter is a no-op for every other hook; it only acts when `displayFooter` is being dispatched.
+- **Controller-specific logic** — `Tools::getValue('controller')` reads the current controller name from the query string. The contact page uses the `contact` controller, so the extra modules are removed only there.
+- **Return the modified array** — `unset()` leaves gaps in the array keys; returning the modified array is sufficient because PrestaShop iterates it with `foreach`.
+
+### Service registration
+
+Tag the service with `core.hook_module_exec_filter` so PrestaShop discovers and calls it:
+
+```yaml
+# config/common.yml
+services:
+  Module\DemoFilterModules\Service\CustomModuleList:
+    tags:
+      - 'core.hook_module_exec_filter'
+```
+
+The module's `config/services.yml` imports `common.yml`, and the front-office container (`config/front/services.yml`) also imports it — ensuring the filter is active in both contexts:
+
+```yaml
+# config/services.yml
+imports:
+  - { resource: ./common.yml }
+```
+
+```yaml
+# config/front/services.yml
+imports:
+  - { resource: ../common.yml }
+```
+
+<Tip>
+  Because the filter runs on **every hook dispatch**, keep the logic inside `filterHookModuleExecList` as lightweight as possible. Avoid database queries or heavy computation here. Use cached values or simple conditionals like string comparisons and constant checks.
+</Tip>
+
+## Use cases
+
+| Use case | Technique |
+|---|---|
+| **A/B testing** | Check a cookie or session variable and remove one of two competing modules |
+| **Conditional widget display** | Suppress a module on specific pages using `Tools::getValue('controller')` or `$_SERVER['REQUEST_URI']` |
+| **Disabling third-party conflicts** | Prevent a module you cannot uninstall from rendering in contexts where it causes issues |
+| **Role-based output** | Check `Context::getContext()->customer->isLogged()` and filter modules meant only for guests |
+
+## Installation
+
+<Steps>
+  <Step title="Copy the module">
+    Place the `demofiltermodules` directory inside your PrestaShop `modules/` folder. The directory name must be `demofiltermodules`.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/demofiltermodules
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    From the Back Office **Module Manager**, or via CLI:
+    ```bash
+    php bin/console prestashop:module install demofiltermodules
+    ```
+  </Step>
+  <Step title="Verify the filter">
+    Navigate to any front-office page that has a footer. Open the page source and confirm that `ps_linklist`'s HTML is absent from the footer area. Then visit the contact page and verify that the contact info block is also missing.
+  </Step>
+</Steps>
+
+<Warning>
+  The `core.hook_module_exec_filter` tag is evaluated for **every hook on every page request**. Make sure your filter short-circuits early (e.g. by checking `$hookName` first) to avoid a performance impact on hooks you do not care about.
+</Warning>

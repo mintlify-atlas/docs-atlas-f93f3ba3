@@ -1,0 +1,255 @@
+---
+title: "Add Widgets and Charts to the PrestaShop Dashboard"
+sidebarTitle: "Dashboard Widget"
+description: "Integrate with PrestaShop 9.2's migrated Symfony dashboard using dedicated hooks to render data cards and Chart.js-powered charts in any dashboard zone."
+---
+
+The `dashexample` module demonstrates how to integrate with the **migrated (Symfony) Back Office Dashboard** introduced in PrestaShop 9.2. It registers on every zone of the new dashboard — top banner, three content columns, bottom area, and toolbar — and renders Chart.js charts (doughnut, line, bar, polar area) using the Chart.js instance that the PrestaShop core provides on the dashboard page. No charting library is bundled with the module; no Smarty, no `HelperForm`, no `Db::getInstance()` — just Twig templates and plain JavaScript.
+
+<Warning>
+This module requires **PrestaShop 9.2.0 or later**. It also requires the **`dashboard` feature flag** to be enabled: *Advanced Parameters → New & Experimental Features → Dashboard*. It will not produce any visible output on earlier versions.
+</Warning>
+
+## Dashboard zones and hook names
+
+The migrated dashboard divides the page into six zones. Each zone has a dedicated hook that is completely separate from the legacy `dashboardZone*` hooks used by the old dashboard:
+
+| Zone | New hook (Symfony dashboard) | Legacy hook |
+|---|---|---|
+| Top banner (full width) | `displayAdminDashboardTop` | `displayDashboardTop` |
+| Toolbar area | `displayAdminDashboardToolbar` | `displayDashboardToolbarTopMenu` |
+| Left column | `displayAdminDashboardZoneOne` | `dashboardZoneOne` |
+| Center column | `displayAdminDashboardZoneTwo` | `dashboardZoneTwo` |
+| Right column | `displayAdminDashboardZoneThree` | `dashboardZoneThree` |
+| Bottom (full width) | `displayAdminDashboardBottom` | *(none)* |
+
+A module does not need to detect which dashboard version is active — the core calls only the hook family that belongs to the currently displayed page.
+
+## Hook registration
+
+All six new hooks are registered in `install()`:
+
+```php
+// dashexample.php
+public function install(): bool
+{
+    return parent::install()
+        && $this->registerHook([
+            'displayAdminDashboardZoneOne',
+            'displayAdminDashboardZoneTwo',
+            'displayAdminDashboardZoneThree',
+            'displayAdminDashboardTop',
+            'displayAdminDashboardBottom',
+            'displayAdminDashboardToolbar',
+        ]);
+}
+```
+
+## Hook callbacks
+
+Each hook callback delegates to a private `render()` helper that uses the Twig service from the Symfony container. Hook parameters include `date_from` and `date_to` — the employee's selected date range on the dashboard page:
+
+```php
+// dashexample.php
+public function hookDisplayAdminDashboardZoneOne(array $params): string
+{
+    return $this->render('zone_one.html.twig', [
+        'dateFrom'  => $params['date_from'] ?? null,
+        'dateTo'    => $params['date_to']   ?? null,
+        'moduleUri' => $this->getPathUri(),
+    ]);
+}
+
+public function hookDisplayAdminDashboardTop(array $params): string
+{
+    return $this->render('top.html.twig', [
+        'dateFrom' => $params['date_from'] ?? null,
+        'dateTo'   => $params['date_to']   ?? null,
+    ]);
+}
+
+private function render(string $template, array $params = []): string
+{
+    /** @var \Twig\Environment $twig */
+    $twig = $this->get('twig');
+    return $twig->render(
+        sprintf('@Modules/%s/views/templates/admin/%s', $this->name, $template),
+        $params
+    );
+}
+```
+
+<Tip>
+Each hook callback passes `moduleUri` so the Twig template can build absolute URLs to the module's own CSS and JS assets. Using `$this->getPathUri()` rather than a hardcoded path keeps the module relocatable.
+</Tip>
+
+## Twig template for a dashboard card
+
+The `top.html.twig` template shows the simplest hook output — an informational banner that displays the selected date range:
+
+```twig
+{# views/templates/admin/top.html.twig #}
+{% trans_default_domain 'Module.Dashexample.Admin' %}
+
+<div class="alert alert-info dashexample-top">
+  <span class="material-icons">campaign</span>
+  {{ 'This banner is rendered by the dashexample module through the displayAdminDashboardTop hook.'|trans }}
+  <span class="text-muted">
+    {{ 'Selected range: %from% → %to%'|trans({'%from%': dateFrom, '%to%': dateTo}) }}
+  </span>
+</div>
+```
+
+The `zone_one.html.twig` template shows the full pattern: load per-hook CSS/JS, render a Bootstrap card, embed chart data as a JSON script block, and provide a `<canvas>` element for Chart.js:
+
+```twig
+{# views/templates/admin/zone_one.html.twig #}
+{% trans_default_domain 'Module.Dashexample.Admin' %}
+
+{# Each hook template loads only the assets its own block needs. #}
+<link rel="stylesheet" href="{{ moduleUri }}views/css/dashexample.css">
+<script src="{{ moduleUri }}views/js/zone-one.js" defer></script>
+
+<div class="card dashexample-card">
+  <div class="card-header">
+    <h3 class="card-header-title">
+      <i class="material-icons">pie_chart</i>
+      {{ 'Traffic sources'|trans }}
+    </h3>
+  </div>
+  <div class="card-body">
+    <p class="text-muted">
+      {{ 'Doughnut chart rendered with the core-provided Chart.js — no colors set, the PrestaShop palette is applied automatically.'|trans }}
+    </p>
+    <canvas id="dashexample-doughnut" height="220"
+            role="img"
+            aria-label="{{ 'Traffic sources breakdown'|trans }}"></canvas>
+    <script type="application/json" id="dashexample-doughnut-data">
+      {
+        "labels": ["Direct", "Search engines", "Referral sites", "Social networks", "Email", "Other"],
+        "values": [32, 25, 15, 12, 9, 7]
+      }
+    </script>
+  </div>
+  <div class="card-footer text-muted">
+    {{ 'Selected range: %from% → %to%'|trans({'%from%': dateFrom, '%to%': dateTo}) }}
+  </div>
+</div>
+```
+
+<Note>
+Embed chart data as a `<script type="application/json">` block rather than inline JavaScript variables. This is XSS-safe and decouples the data from the rendering logic.
+</Note>
+
+## Chart.js initialization
+
+The dashboard page loads Chart.js v4 as a core bundle (`chartjs.bundle.js`) that exposes two globals:
+
+- **`Chart`** — the Chart.js entry point.
+- **`psChart`** — the PrestaShop color palette. Its `psChart.colors` object maps names like `blue`, `green`, `teal`, `gray` to CSS color values derived from design-kit tokens. Its `psChart.series` array provides a categorical ramp in brand order.
+
+A chart whose datasets define **no color at all** is automatically colored with the PrestaShop palette by a core Chart.js plugin. The zone-one doughnut relies on this:
+
+```javascript
+// views/js/zone-one.js
+(function () {
+  function readJson(id) {
+    var el = document.getElementById(id);
+    return el ? JSON.parse(el.textContent) : null;
+  }
+
+  function initDoughnut() {
+    var canvas = document.getElementById('dashexample-doughnut');
+    var data   = readJson('dashexample-doughnut-data');
+
+    if (!canvas || !data || typeof Chart === 'undefined') {
+      return;
+    }
+
+    // No colors set — the core psColors plugin applies the PrestaShop palette automatically.
+    new Chart(canvas, {
+      type: 'doughnut',
+      data: {
+        labels:   data.labels,
+        datasets: [{ data: data.values }],
+      },
+      options: {
+        plugins: { legend: { position: 'bottom' } },
+      },
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', initDoughnut);
+})();
+```
+
+<Tip>
+Always guard against `typeof Chart === 'undefined'`. If the hook is rendered outside the dashboard page (e.g. during a cache warm-up), the chart bundle is not loaded and `Chart` will not exist.
+</Tip>
+
+## Per-hook asset loading
+
+Each Twig template loads the CSS and JavaScript it needs via `<link>` and `<script>` tags in its own output — not via `actionAdminControllerSetMedia`. This means:
+
+- Each hook works independently even if the other hooks are unregistered.
+- No `get_class($this->context->controller)` detection is needed to decide which page the assets should load on.
+- Assets are loaded exactly once if only one hook is active, and multiple times if multiple hooks are active on the same page (deduplicate in CSS if needed).
+
+## Supporting both old and new dashboard in one module
+
+To support both the legacy and the Symfony dashboard from a single codebase, register on both hook families and render with the matching architecture:
+
+```php
+public function install(): bool
+{
+    return parent::install()
+        && $this->registerHook([
+            // Migrated (Symfony) dashboard — Twig
+            'displayAdminDashboardZoneOne',
+            'displayAdminDashboardZoneTwo',
+            'displayAdminDashboardToolbar',
+            // Legacy dashboard — Smarty / HelperForm as before
+            'dashboardZoneOne',
+            'dashboardZoneTwo',
+            'displayDashboardToolbarTopMenu',
+        ]);
+}
+
+// Called only on the migrated page
+public function hookDisplayAdminDashboardZoneOne(array $params): string
+{
+    return $this->get('twig')->render(
+        '@Modules/mymodule/views/templates/admin/zone_one.html.twig',
+        $params
+    );
+}
+
+// Called only on the legacy page
+public function hookDashboardZoneOne(array $params): string
+{
+    $this->smarty->assign($params);
+    return $this->display(__FILE__, 'views/templates/hook/zone_one.tpl');
+}
+```
+
+The core calls only the hook family that matches the currently active dashboard, so the two callbacks never collide.
+
+## Installation
+
+<Steps>
+  <Step title="Clone or download the module">
+    Place the module in your PrestaShop `modules/` directory, ensuring the folder is named `dashexample`.
+  </Step>
+  <Step title="Install the module">
+    No Composer step is required for this module. Install via the Back Office Module Manager, or run:
+    ```bash
+    php bin/console prestashop:module install dashexample
+    ```
+  </Step>
+  <Step title="Enable the dashboard feature flag">
+    In the Back Office go to **Advanced Parameters → New & Experimental Features** and enable the **Dashboard** flag.
+  </Step>
+  <Step title="Open the dashboard">
+    Navigate to the **Dashboard** page. You will see the module's cards rendered in every zone — including charts in all three columns and a banner at the top.
+  </Step>
+</Steps>

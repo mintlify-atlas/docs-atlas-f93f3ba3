@@ -1,0 +1,638 @@
+---
+title: "Manage Custom Data with Doctrine ORM Entities"
+sidebarTitle: "Doctrine Entities"
+description: "Define multilingual Doctrine entities, install tables via SQL, expose a CRUD admin grid, and surface data on the front office using PrestaShop 9 hooks."
+---
+
+The `demodoctrine` module is the canonical reference for using **Doctrine ORM** to manage a module's own persistent data in PrestaShop 9. It replaces the older `ObjectModel` approach with a pair of properly-mapped entities — `Quote` and `QuoteLang` — and wires them into a full admin CRUD grid, a Symfony form, and a front-office hook. Everything from table creation to service registration is demonstrated with real, production-style code.
+
+## What the module demonstrates
+
+| Area | Implementation |
+|---|---|
+| Custom Doctrine entities | `Quote` (main) + `QuoteLang` (multilingual `_lang` table) |
+| Schema installation | `QuoteInstaller` runs `install.sql` via DBAL at module install |
+| Admin CRUD grid | `QuoteGridDefinitionFactory` + `QuoteQueryBuilder` |
+| Create / Edit forms | `QuoteType` (Symfony form, with `TranslatableType` for multilingual content) |
+| Form data flow | `QuoteFormDataProvider` + `QuoteFormDataHandler` |
+| Front-office display | `hookDisplayHome` fetches random quotes via `QuoteRepository` |
+
+## Installation
+
+<Steps>
+  <Step title="Clone the module">
+    Place the module in your PrestaShop `modules/` directory and ensure the folder is named `demodoctrine`.
+
+    ```bash
+    cd modules/
+    git clone https://github.com/PrestaShop/example-modules.git
+    cp -r example-modules/demodoctrine demodoctrine
+    ```
+  </Step>
+
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd demodoctrine
+    composer install
+    ```
+  </Step>
+
+  <Step title="Install the module">
+    From the Back Office Module Manager, or via CLI:
+
+    ```bash
+    php bin/console prestashop:module install demodoctrine
+    ```
+
+    During installation, `install()` calls `installTables()` which invokes `QuoteInstaller::createTables()`, then registers the `displayHome` hook.
+  </Step>
+</Steps>
+
+<Note>
+  The module requires PrestaShop **9.0.0** or newer. The Doctrine ORM integration is managed by the PS core container — no additional Doctrine bundle setup is needed inside the module.
+</Note>
+
+## Entity design: Quote and QuoteLang
+
+The module uses a classic `_lang` table pattern: a main `Quote` entity holds language-agnostic data (author, timestamps) and a `QuoteLang` entity holds per-language content. This mirrors how PrestaShop's own `ObjectModel` handles multilingual fields.
+
+### Quote entity
+
+```php
+// src/Entity/Quote.php
+namespace Module\DemoDoctrine\Entity;
+
+use DateTime;
+use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\ORM\Mapping as ORM;
+
+/**
+ * @ORM\Table()
+ * @ORM\Entity(repositoryClass="Module\DemoDoctrine\Repository\QuoteRepository")
+ * @ORM\HasLifecycleCallbacks
+ */
+class Quote
+{
+    /**
+     * @var int
+     *
+     * @ORM\Id
+     * @ORM\Column(name="id_quote", type="integer")
+     * @ORM\GeneratedValue(strategy="AUTO")
+     */
+    private $id;
+
+    /**
+     * @var string
+     *
+     * @ORM\Column(name="author", type="string", length=255)
+     */
+    private $author;
+
+    /**
+     * @ORM\OneToMany(targetEntity="Module\DemoDoctrine\Entity\QuoteLang", cascade={"persist", "remove"}, mappedBy="quote")
+     */
+    private $quoteLangs;
+
+    /**
+     * @var DateTime
+     *
+     * @ORM\Column(name="date_add", type="datetime")
+     */
+    private $dateAdd;
+
+    /**
+     * @var DateTime
+     *
+     * @ORM\Column(name="date_upd", type="datetime")
+     */
+    private $dateUpd;
+
+    public function __construct()
+    {
+        $this->quoteLangs = new ArrayCollection();
+    }
+
+    // ... getters/setters
+
+    /**
+     * Auto-update timestamps before persist/update.
+     *
+     * @ORM\PrePersist
+     * @ORM\PreUpdate
+     */
+    public function updatedTimestamps()
+    {
+        $this->setDateUpd(new DateTime());
+        if ($this->getDateAdd() == null) {
+            $this->setDateAdd(new DateTime());
+        }
+    }
+}
+```
+
+<Tip>
+  The `@ORM\HasLifecycleCallbacks` annotation combined with `@ORM\PrePersist` / `@ORM\PreUpdate` on `updatedTimestamps()` is a clean way to automate `date_add` / `date_upd` management — no manual timestamping required in your form handler.
+</Tip>
+
+### QuoteLang entity
+
+`QuoteLang` forms a **composite primary key** from `id_quote` and `id_lang`, joining directly to PrestaShop's built-in `Lang` entity.
+
+```php
+// src/Entity/QuoteLang.php
+namespace Module\DemoDoctrine\Entity;
+
+use Doctrine\ORM\Mapping as ORM;
+use PrestaShopBundle\Entity\Lang;
+
+/**
+ * @ORM\Table()
+ * @ORM\Entity()
+ */
+class QuoteLang
+{
+    /**
+     * @var Quote
+     * @ORM\Id
+     * @ORM\ManyToOne(targetEntity="Module\DemoDoctrine\Entity\Quote", inversedBy="quoteLangs")
+     * @ORM\JoinColumn(name="id_quote", referencedColumnName="id_quote", nullable=false)
+     */
+    private $quote;
+
+    /**
+     * @var Lang
+     * @ORM\Id
+     * @ORM\ManyToOne(targetEntity="PrestaShopBundle\Entity\Lang")
+     * @ORM\JoinColumn(name="id_lang", referencedColumnName="id_lang", nullable=false, onDelete="CASCADE")
+     */
+    private $lang;
+
+    /**
+     * @var string
+     * @ORM\Column(name="content", type="string", nullable=true)
+     */
+    private $content;
+
+    // ... getters/setters
+}
+```
+
+The `onDelete="CASCADE"` on `id_lang` ensures translations are pruned automatically when a PrestaShop language is removed.
+
+## Schema installation: QuoteInstaller
+
+Because Doctrine entity mapping is not yet available during module install (the container hasn't registered the module's services yet), `QuoteInstaller` uses the **DBAL connection directly** to execute raw SQL.
+
+```php
+// src/Database/QuoteInstaller.php
+namespace Module\DemoDoctrine\Database;
+
+use Doctrine\DBAL\Connection;
+use Doctrine\DBAL\Exception as DBALException;
+
+class QuoteInstaller
+{
+    public function __construct(
+        private readonly Connection $connection,
+        private readonly string $dbPrefix
+    ) {
+    }
+
+    public function createTables(): array
+    {
+        $errors = [];
+        $this->dropTables();
+        $sqlInstallFile = __DIR__ . '/../../Resources/data/install.sql';
+        $sqlQueries = preg_split('/\r\n|\r|\n/', file_get_contents($sqlInstallFile));
+        $sqlQueries = str_replace('PREFIX_', $this->dbPrefix, $sqlQueries);
+
+        foreach ($sqlQueries as $query) {
+            if (empty($query)) {
+                continue;
+            }
+            try {
+                $this->connection->executeQuery($query);
+            } catch (DBALException $e) {
+                $errors[] = [
+                    'key' => $e->getMessage(),
+                    'parameters' => [],
+                    'domain' => 'Admin.Modules.Notification',
+                ];
+            }
+        }
+
+        return $errors;
+    }
+
+    public function dropTables(): array
+    {
+        $errors = [];
+        $tableNames = ['quote', 'quote_lang'];
+        foreach ($tableNames as $tableName) {
+            $sql = 'DROP TABLE IF EXISTS ' . $this->dbPrefix . $tableName;
+            try {
+                $this->connection->executeQuery($sql);
+            } catch (DBALException $e) {
+                $errors[] = [
+                    'key' => $e->getMessage(),
+                    'parameters' => [],
+                    'domain' => 'Admin.Modules.Notification',
+                ];
+            }
+        }
+        return $errors;
+    }
+}
+```
+
+The SQL file that gets executed:
+
+```sql
+-- Resources/data/install.sql
+CREATE TABLE IF NOT EXISTS `PREFIX_quote` (id_quote INT AUTO_INCREMENT NOT NULL, author VARCHAR(255) NOT NULL, date_add DATETIME NOT NULL, date_upd DATETIME NOT NULL, PRIMARY KEY(id_quote)) DEFAULT CHARACTER SET utf8 COLLATE utf8_unicode_ci ENGINE = InnoDB
+CREATE TABLE IF NOT EXISTS `PREFIX_quote_lang` (id_quote INT NOT NULL, id_lang INT NOT NULL, content LONGTEXT NULL, INDEX IDX_4D76F37E85F48AC4 (id_quote), INDEX IDX_4D76F37EBA299860 (id_lang), PRIMARY KEY(id_quote, id_lang)) DEFAULT CHARACTER SET utf8 COLLATE utf8_unicode_ci ENGINE = InnoDB
+```
+
+<Note>
+  The installer drops tables before recreating them (`dropTables()` is called inside `createTables()`). This means a fresh install always starts clean. If you need to preserve data on reinstall, remove the `dropTables()` call and use `IF NOT EXISTS` alone.
+</Note>
+
+The main module file handles the fallback case where the service container is not yet available at install time:
+
+```php
+// demodoctrine.php
+private function getInstaller(): QuoteInstaller
+{
+    try {
+        $installer = $this->get(QuoteInstaller::class);
+    } catch (Exception) {
+        $installer = null;
+    }
+
+    // During install the module's service is not available yet, so build it manually
+    if (!$installer) {
+        $installer = new QuoteInstaller(
+            $this->get('doctrine.dbal.default_connection'),
+            $this->getContainer()->getParameter('database_prefix')
+        );
+    }
+
+    return $installer;
+}
+```
+
+## Repository: QuoteRepository
+
+`QuoteRepository` extends Doctrine's `EntityRepository` and adds a `getRandom()` method used by the front-office hook. Because `RAND()` is not available in Doctrine DQL by default, randomisation is performed in PHP:
+
+```php
+// src/Repository/QuoteRepository.php
+namespace Module\DemoDoctrine\Repository;
+
+use Doctrine\ORM\EntityRepository;
+use Doctrine\ORM\QueryBuilder;
+
+class QuoteRepository extends EntityRepository
+{
+    /**
+     * Fetches $limit random quotes for the given language.
+     *
+     * @param int $langId
+     * @param int $limit
+     * @return array
+     */
+    public function getRandom($langId = 0, $limit = 0)
+    {
+        /** @var QueryBuilder $qb */
+        $qb = $this->createQueryBuilder('q')
+            ->addSelect('q')
+            ->addSelect('ql')
+            ->leftJoin('q.quoteLangs', 'ql');
+
+        if (0 !== $langId) {
+            $qb
+                ->andWhere('ql.lang = :langId')
+                ->setParameter('langId', $langId);
+        }
+
+        $ids = $this->getAllIds();
+        shuffle($ids);
+        if ($limit > 0) {
+            $ids = array_slice($ids, 0, $limit);
+        }
+        $qb
+            ->andWhere('q.id in (:ids)')
+            ->setParameter('ids', $ids);
+
+        $quotes = $qb->getQuery()->getResult();
+        uasort($quotes, function ($a, $b) use ($ids) {
+            return array_search($a->getId(), $ids) - array_search($b->getId(), $ids);
+        });
+
+        return $quotes;
+    }
+
+    public function getAllIds()
+    {
+        $qb = $this->createQueryBuilder('q')->select('q.id');
+        $quotes = $qb->getQuery()->getScalarResult();
+        return array_map(fn($quote) => $quote['id'], $quotes);
+    }
+}
+```
+
+## Admin CRUD grid
+
+### QuoteGridDefinitionFactory
+
+The grid definition describes columns, row actions, bulk actions, grid actions, and search filters. It extends `AbstractGridDefinitionFactory`:
+
+```php
+// src/Grid/Definition/Factory/QuoteGridDefinitionFactory.php
+class QuoteGridDefinitionFactory extends AbstractGridDefinitionFactory
+{
+    const GRID_ID = 'quote';
+
+    protected function getId() { return self::GRID_ID; }
+
+    protected function getName()
+    {
+        return $this->trans('Quotes', [], 'Modules.Demodoctrine.Admin');
+    }
+
+    protected function getColumns()
+    {
+        return (new ColumnCollection())
+            ->add((new BulkActionColumn('bulk'))
+                ->setOptions(['bulk_field' => 'id_quote'])
+            )
+            ->add((new DataColumn('id_quote'))
+                ->setName($this->trans('ID', [], 'Admin.Global'))
+                ->setOptions(['field' => 'id_quote'])
+            )
+            ->add((new DataColumn('author'))
+                ->setName($this->trans('Author', [], 'Modules.Demodoctrine.Admin'))
+                ->setOptions(['field' => 'author'])
+            )
+            ->add((new DataColumn('content'))
+                ->setName($this->trans('Content', [], 'Modules.Demodoctrine.Admin'))
+                ->setOptions(['field' => 'content'])
+            )
+            ->add((new ActionColumn('actions'))
+                ->setOptions([
+                    'actions' => (new RowActionCollection())
+                        ->add((new LinkRowAction('edit'))
+                            ->setOptions([
+                                'route' => 'ps_demodoctrine_quote_edit',
+                                'route_param_name' => 'quoteId',
+                                'route_param_field' => 'id_quote',
+                                'clickable_row' => true,
+                            ])
+                        )
+                        ->add((new SubmitRowAction('delete'))
+                            ->setOptions([
+                                'method' => 'DELETE',
+                                'route' => 'ps_demodoctrine_quote_delete',
+                                'route_param_name' => 'quoteId',
+                                'route_param_field' => 'id_quote',
+                                'confirm_message' => $this->trans(
+                                    'Delete selected item?', [], 'Admin.Notifications.Warning'
+                                ),
+                            ])
+                        ),
+                ])
+            );
+    }
+
+    // getFilters(), getGridActions(), getBulkActions() also defined
+}
+```
+
+### QuoteQueryBuilder
+
+The query builder provides `getSearchQueryBuilder()` (with sorting and pagination) and `getCountQueryBuilder()` for the grid. It joins the `_lang` table and filters by the current back-office language:
+
+```php
+// src/Grid/Query/QuoteQueryBuilder.php
+class QuoteQueryBuilder extends AbstractDoctrineQueryBuilder
+{
+    public function __construct(
+        Connection $connection,
+        string $dbPrefix,
+        private readonly DoctrineSearchCriteriaApplicatorInterface $searchCriteriaApplicator,
+        private readonly LanguageContext $languageContext,
+    ) {
+        parent::__construct($connection, $dbPrefix);
+    }
+
+    public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+    {
+        $qb = $this->getQueryBuilder($searchCriteria->getFilters());
+        $qb->select('q.id_quote, q.author, ql.content')
+           ->groupBy('q.id_quote');
+
+        $this->searchCriteriaApplicator
+            ->applySorting($searchCriteria, $qb)
+            ->applyPagination($searchCriteria, $qb);
+
+        return $qb;
+    }
+
+    public function getCountQueryBuilder(SearchCriteriaInterface $searchCriteria)
+    {
+        return $this->getQueryBuilder($searchCriteria->getFilters())
+            ->select('COUNT(DISTINCT q.id_quote)');
+    }
+
+    private function getQueryBuilder(array $filters)
+    {
+        $qb = $this->connection->createQueryBuilder()
+            ->from($this->dbPrefix . 'quote', 'q')
+            ->innerJoin('q', $this->dbPrefix . 'quote_lang', 'ql', 'q.id_quote = ql.id_quote')
+            ->andWhere('ql.`id_lang`= :language')
+            ->setParameter('language', $this->languageContext->getId());
+
+        $allowedFilters = ['id_quote', 'author', 'content'];
+        foreach ($filters as $name => $value) {
+            if (!in_array($name, $allowedFilters, true)) { continue; }
+            if ('id_quote' === $name) {
+                $qb->andWhere('q.`id_quote` = :' . $name)->setParameter($name, $value);
+                continue;
+            }
+            $qb->andWhere("$name LIKE :$name")->setParameter($name, '%' . $value . '%');
+        }
+
+        return $qb;
+    }
+}
+```
+
+## Symfony form: QuoteType
+
+`QuoteType` uses `TranslatableType` to render a per-language textarea for the quote content, and a plain `TextType` for the author name. It extends `TranslatorAwareType` to access the `trans()` helper:
+
+```php
+// src/Form/QuoteType.php
+namespace Module\DemoDoctrine\Form;
+
+use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\DefaultLanguage;
+use PrestaShopBundle\Form\Admin\Type\TranslatableType;
+use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+use Symfony\Component\Form\Extension\Core\Type\TextType;
+use Symfony\Component\Form\FormBuilderInterface;
+use Symfony\Component\Validator\Constraints\Length;
+use Symfony\Component\Validator\Constraints\NotBlank;
+
+class QuoteType extends TranslatorAwareType
+{
+    public function buildForm(FormBuilderInterface $builder, array $options)
+    {
+        $builder
+            ->add('author', TextType::class, [
+                'label' => 'Author name',
+                'help' => 'Author name (e.g. Alexandre Dumas).',
+                'translation_domain' => 'Modules.Demodoctrine.Admin',
+                'constraints' => [
+                    new Length(['max' => 255, 'maxMessage' => '...']),
+                    new NotBlank(),
+                ],
+            ])
+            ->add('content', TranslatableType::class, [
+                'label' => 'Content',
+                'help' => 'Quote content (e.g. All for one, one for all).',
+                'translation_domain' => 'Modules.Demodoctrine.Admin',
+                'constraints' => [
+                    new DefaultLanguage([
+                        'message' => $this->trans(
+                            'The field %field_name% is required at least in your default language.',
+                            'Admin.Notifications.Error',
+                            ['%field_name%' => '"Content"']
+                        ),
+                    ]),
+                ],
+            ]);
+    }
+}
+```
+
+<Tip>
+  `TranslatableType` is a PrestaShop form type that renders one input per installed language using the standard language switcher tabs. The `DefaultLanguage` constraint enforces that at minimum the default language value is filled in.
+</Tip>
+
+## Front-office hook: hookDisplayHome
+
+When the module is installed it registers the `displayHome` hook. The hook method retrieves three random quotes for the current language via `QuoteRepository::getRandom()`, assigns them to Smarty, and renders a `.tpl` template:
+
+```php
+// demodoctrine.php
+public function hookDisplayHome()
+{
+    $repository = $this->get(QuoteRepository::class);
+    $langId = $this->context->language->id;
+    $quotes = $repository->getRandom($langId, 3);
+
+    $this->smarty->assign(['quotes' => $quotes]);
+
+    return $this->fetch('module:demodoctrine/views/templates/front/home.tpl');
+}
+```
+
+## Service registration
+
+All services are declared in `config/services.yml`. Key points:
+
+- `QuoteType` uses `parent: 'form.type.translatable.aware'` so the multistore-feature flag is injected automatically.
+- The form builder and handler are wired using the core `FormBuilderFactory` / `FormHandlerFactory` services.
+- `QuoteQueryBuilder` uses `parent: 'prestashop.core.grid.abstract_query_builder'` which injects the DBAL connection and DB prefix.
+- The grid factory assembles definition, data provider, filter form factory, and hook dispatcher.
+
+```yaml
+# config/services.yml
+imports:
+    - { resource: ./common.yml }
+
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    Module\DemoDoctrine\Controller\Admin\QuotesController: ~
+
+    # Form services
+    Module\DemoDoctrine\Form\QuoteType:
+        parent: 'form.type.translatable.aware'
+        arguments:
+            - '@=service("prestashop.adapter.multistore_feature").isUsed()'
+        tags:
+            - { name: form.type }
+
+    Module\DemoDoctrine\Form\QuoteFormDataProvider: ~
+
+    prestashop.module.demodoctrine.form.identifiable_object.builder.quote_form_builder:
+        class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilder'
+        factory: [ '@prestashop.core.form.builder.form_builder_factory', 'create' ]
+        arguments:
+            - 'Module\DemoDoctrine\Form\QuoteType'
+            - '@Module\DemoDoctrine\Form\QuoteFormDataProvider'
+
+    Module\DemoDoctrine\Form\QuoteFormDataHandler: ~
+
+    prestashop.module.demodoctrine.form.identifiable_object.handler.quote_form_handler:
+        class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandler'
+        factory: [ '@prestashop.core.form.identifiable_object.handler.form_handler_factory', 'create' ]
+        arguments:
+            - '@Module\DemoDoctrine\Form\QuoteFormDataHandler'
+
+    # Grid services
+    prestashop.module.demodoctrine.grid.definition.factory.quotes:
+        class: 'Module\DemoDoctrine\Grid\Definition\Factory\QuoteGridDefinitionFactory'
+        parent: 'prestashop.core.grid.definition.factory.abstract_grid_definition'
+
+    Module\DemoDoctrine\Grid\Query\QuoteQueryBuilder:
+        parent: 'prestashop.core.grid.abstract_query_builder'
+        autowire: true
+        autoconfigure: true
+
+    prestashop.module.demodoctrine.grid.data_provider.quotes:
+        class: '%prestashop.core.grid.data.factory.doctrine_grid_data_factory%'
+        arguments:
+            - '@Module\DemoDoctrine\Grid\Query\QuoteQueryBuilder'
+            - '@prestashop.core.hook.dispatcher'
+            - '@prestashop.core.grid.query.doctrine_query_parser'
+            - 'quote'
+
+    prestashop.module.demodoctrine.grid.factory.quotes:
+        class: 'PrestaShop\PrestaShop\Core\Grid\GridFactory'
+        arguments:
+            - '@prestashop.module.demodoctrine.grid.definition.factory.quotes'
+            - '@prestashop.module.demodoctrine.grid.data_provider.quotes'
+            - '@prestashop.core.grid.filter.form_factory'
+            - '@prestashop.core.hook.dispatcher'
+```
+
+## Admin controller overview
+
+`QuotesController` extends `PrestaShopAdminController` and provides `indexAction`, `createAction`, `editAction`, `deleteAction`, `deleteBulkAction`, `searchAction`, and `generateAction`. Grid factories and form builders/handlers are injected via `#[Autowire]` attributes on action method parameters — no constructor injection required:
+
+```php
+public function indexAction(
+    QuoteFilters $filters,
+    #[Autowire(service: 'prestashop.module.demodoctrine.grid.factory.quotes')]
+    GridFactoryInterface $quoteGridFactory,
+): Response {
+    return $this->render(
+        '@Modules/demodoctrine/views/templates/admin/index.html.twig',
+        [
+            'enableSidebar' => true,
+            'layoutTitle' => $this->trans('Quotes', [], 'Modules.Demodoctrine.Admin'),
+            'layoutHeaderToolbarBtn' => $this->getToolbarButtons(),
+            'quoteGrid' => $this->presentGrid($quoteGridFactory->getGrid($filters)),
+        ]
+    );
+}
+```
+
+<Note>
+  The `#[Autowire(service: '...')]` PHP 8 attribute is the PrestaShop 9 way to inject named services into controller action parameters without declaring them in `services.yml`. It replaces the older `@service` argument annotation pattern.
+</Note>

@@ -1,0 +1,415 @@
+---
+title: "Extend PrestaShop's REST API with API Platform Resources"
+sidebarTitle: "API Platform"
+description: "Define custom API Platform resources and state handlers to add new REST endpoints to PrestaShop 9's new API, with full create, read, update, and delete support."
+---
+
+PrestaShop 9 ships a brand-new REST API built on top of [API Platform](https://api-platform.com/). Instead of writing routing files and controllers by hand, you annotate a plain PHP class with `#[ApiResource]` and point it at two handlers — a **provider** (reads data) and a **processor** (writes data). PrestaShop's Symfony kernel auto-discovers these services via the module's `services.yml` and immediately exposes full CRUD endpoints, an OpenAPI specification, and JSON-LD hypermedia support.
+
+This module (`api_module`) ships two complete examples that illustrate the two most common persistence strategies: an **in-memory / file-backed** resource (`Cat`) and a **Doctrine + ObjectModel–backed** resource (`Horse`).
+
+<Note>
+  The minimum compatible PrestaShop version for this module is **9.0.0**. The new API is not available in any PrestaShop 1.7 or 8.x release.
+</Note>
+
+## How it works
+
+### The `#[ApiResource]` attribute
+
+Every API resource is a plain PHP DTO decorated with `#[ApiResource]`. The two most important parameters are:
+
+| Parameter   | Purpose                                                                          |
+|-------------|----------------------------------------------------------------------------------|
+| `provider`  | A class that implements `ProviderInterface` — fetches items or collections       |
+| `processor` | A class that implements `ProcessorInterface` — handles POST, PUT, PATCH, DELETE  |
+
+Fields exposed as API properties carry additional constraints via `#[ApiProperty]` and Symfony Validator attributes.
+
+### Cat — stateless, file-backed resource
+
+`Cat` is the simplest possible resource. It stores data in a local JSON file, with no database involved, making it ideal as a first-time reference.
+
+```php
+// src/ApiPlatform/Resources/Cat.php
+declare(strict_types=1);
+
+namespace PrestaShop\Module\ApiModule\ApiPlatform\Resources;
+
+use ApiPlatform\Metadata\ApiProperty;
+use ApiPlatform\Metadata\ApiResource;
+use PrestaShop\Module\ApiModule\ApiPlatform\State\CatProcessor;
+use PrestaShop\Module\ApiModule\ApiPlatform\State\CatProvider;
+use Symfony\Component\Validator\Constraints as Assert;
+
+#[ApiResource(
+    provider: CatProvider::class,
+    processor: CatProcessor::class
+)]
+class Cat
+{
+    #[ApiProperty(identifier: true)]
+    public ?string $uuid = null;
+
+    public function __construct(
+        #[Assert\NotBlank]
+        #[Assert\Type('string')]
+        public string $name,
+    )
+    {
+
+    }
+}
+```
+
+Key points:
+- `#[ApiProperty(identifier: true)]` on `$uuid` tells API Platform which field is the resource ID (`/api/cats/{uuid}`).
+- Symfony's `#[Assert\NotBlank]` and `#[Assert\Type]` are evaluated on every write operation.
+- The provider and processor are wired directly in the attribute — no YAML routing needed.
+
+### CatProvider — reading without a database
+
+`CatProvider` implements `ProviderInterface` and reads from a JSON file. It distinguishes collection requests (list all cats) from item requests (fetch one cat by UUID):
+
+```php
+// src/ApiPlatform/State/CatProvider.php
+declare(strict_types=1);
+
+namespace PrestaShop\Module\ApiModule\ApiPlatform\State;
+
+use ApiPlatform\Metadata\Operation;
+use ApiPlatform\State\ProviderInterface;
+use ApiPlatform\Metadata\CollectionOperationInterface;
+use PrestaShop\Module\ApiModule\ApiPlatform\Resources\Cat;
+
+/**
+ * @implements ProviderInterface<Cat|null>
+ */
+final class CatProvider implements ProviderInterface
+{
+    public const STORAGE_FILE = __DIR__ . '/../../Resources/data/data.json';
+    private array $data;
+
+    public function __construct() {
+        $jsonStorageFile = self::STORAGE_FILE;
+        $jsonData = file_get_contents($jsonStorageFile);
+        $this->data = json_decode($jsonData, true);
+    }
+
+    public function provide(Operation $operation, array $uriVariables = [], array $context = []): array|Cat|null
+    {
+        if ($operation instanceof CollectionOperationInterface) {
+            $results = [];
+
+            foreach ($this->data as $cat) {
+                $newCat = new Cat($cat['name']);
+                $newCat->uuid = $cat['uuid'];
+                $results[] = $newCat;
+            }
+
+            return $results;
+        }
+
+        return $this->findCatByUuid($uriVariables['uuid']);
+    }
+
+    private function findCatByUuid(string $uuid): ?Cat
+    {
+        foreach ($this->data as $cat) {
+            if ($cat['uuid'] === $uuid) {
+                $newCat = new Cat($cat['name']);
+                $newCat->uuid = $uuid;
+
+                return $newCat;
+            }
+        }
+
+        return null;
+    }
+}
+```
+
+- `CollectionOperationInterface` is the marker for `GET /api/cats` (list).
+- Any other operation falls through to `findCatByUuid()`, used for `GET /api/cats/{uuid}`.
+- `$uriVariables['uuid']` is automatically populated from the URL by API Platform.
+
+### CatProcessor — writing without a database
+
+`CatProcessor` implements `ProcessorInterface` and handles create, update, and delete by mutating the same JSON file:
+
+```php
+// src/ApiPlatform/State/CatProcessor.php (excerpt)
+final class CatProcessor implements ProcessorInterface
+{
+    public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): mixed
+    {
+        if (!$data instanceof Cat) {
+            return null;
+        }
+
+        if ($operation instanceof DeleteOperationInterface) {
+            return $this->remove($data, $operation, $uriVariables, $context);
+        }
+
+        return $this->persist($data, $operation, $uriVariables, $context);
+    }
+    // ...
+}
+```
+
+The processor receives the deserialized `$data` object (already validated). It branches on `DeleteOperationInterface` to distinguish deletes from creates/updates.
+
+---
+
+### Horse — Doctrine-backed resource
+
+`Horse` demonstrates real database persistence. The API resource DTO (`Horse` in `ApiPlatform/Resources/`) is kept separate from the ObjectModel entity (`Horse` in `Entity/`), connected by a static factory method:
+
+```php
+// src/ApiPlatform/Resources/Horse.php (excerpt)
+#[ApiResource(
+    provider: HorseProvider::class,
+    processor: HorseProcessor::class
+)]
+class Horse
+{
+    #[ApiProperty(identifier: true)]
+    public ?int $id = null;
+
+    #[Assert\NotBlank]
+    #[Assert\Type('string')]
+    public ?string $name = null;
+
+    #[Assert\NotBlank]
+    #[Assert\Type('string')]
+    public ?string $coatColor = null;
+
+    #[Assert\NotBlank]
+    #[Assert\Type('float')]
+    #[Assert\GreaterThanOrEqual(50)]
+    public ?float $weight = null;
+
+    public static function fromObjectModel(ObjectModelHorse $omHorse): self
+    {
+        $horse = new self();
+        $horse->id = (int) $omHorse->id;
+        $horse->name = $omHorse->name;
+        $horse->coatColor = $omHorse->coat_color;
+        $horse->weight = $omHorse->weight;
+
+        return $horse;
+    }
+}
+```
+
+`HorseProvider` injects `HorseRepository` and delegates all DB queries to it:
+
+```php
+// src/ApiPlatform/State/HorseProvider.php (excerpt)
+final class HorseProvider implements ProviderInterface
+{
+    public function __construct(
+        private readonly HorseRepository $horseRepository,
+    ) {
+    }
+
+    public function provide(Operation $operation, array $uriVariables = [], array $context = []): array|Horse|null
+    {
+        if ($operation instanceof CollectionOperationInterface) {
+            return $this->findAllHorses();
+        }
+
+        $horse = $this->findHorseById($uriVariables['id']);
+        // ...
+        return $horse;
+    }
+}
+```
+
+### The ObjectModel entity
+
+The `Horse` ObjectModel lives under `src/Entity/Horse.php` and uses the standard PrestaShop `$definition` array:
+
+```php
+// src/Entity/Horse.php
+namespace PrestaShop\Module\ApiModule\Entity;
+
+use ObjectModel;
+
+class Horse extends ObjectModel
+{
+    public $name;
+    public $coat_color;
+    public $weight;
+
+    public static $definition = [
+        'table' => 'horse',
+        'primary' => 'id_horse',
+        'fields' => [
+            'name'       => ['type' => self::TYPE_STRING, 'validate' => 'isCleanHtml', 'required' => true, 'size' => 64],
+            'coat_color' => ['type' => self::TYPE_STRING, 'validate' => 'isCleanHtml', 'required' => true, 'size' => 64],
+            'weight'     => ['type' => self::TYPE_FLOAT,  'validate' => 'isFloat',     'required' => true],
+        ],
+    ];
+}
+```
+
+The table is created during `install()` via `DBInstaller`.
+
+### Hamster — pure Doctrine ORM entity
+
+The `Hamster` entity shows a third approach: a full Doctrine ORM entity with `#[ApiResource]` applied directly to the entity class, letting API Platform use its built-in Doctrine data provider automatically:
+
+```php
+// src/Entity/Hamster.php (excerpt)
+#[ApiResource]
+/**
+ * @ORM\Table()
+ * @ORM\Entity()
+ */
+class Hamster
+{
+    /**
+     * @ORM\Id
+     * @ORM\Column(name="id", type="integer")
+     * @ORM\GeneratedValue(strategy="AUTO")
+     */
+    private int $id;
+
+    /** @ORM\Column(name="name", type="string", length=64) */
+    private string $name;
+
+    /** @ORM\Column(name="description", type="string", length=64) */
+    private string $description;
+
+    /** @ORM\Column(name="weight", type="float") */
+    private float $weight;
+    // getters/setters ...
+}
+```
+
+<Tip>
+  For new modules, prefer the DTO-separated approach (like `Horse`) over annotating the persistence entity directly. Keeping API representation and storage separate gives you more flexibility when the schema evolves.
+</Tip>
+
+### HorseRepository
+
+`HorseRepository` wraps Doctrine DBAL for queries and delegates create/update/delete to the ObjectModel:
+
+```php
+// src/Repository/HorseRepository.php (excerpt)
+class HorseRepository
+{
+    public function __construct(
+        private readonly Connection $connection,
+        private readonly string $dbPrefix
+    ) {}
+
+    public function findAllHorses(): array
+    {
+        return $this->connection->createQueryBuilder()
+            ->select('h.id_horse, h.name, h.coat_color, h.weight')
+            ->from($this->dbPrefix . 'horse', 'h')
+            ->executeQuery()
+            ->fetchAllAssociative();
+    }
+
+    public function create(string $name, string $color, float $weight): Horse
+    {
+        $horse = new Horse();
+        $horse->name = $name;
+        $horse->coat_color = $color;
+        $horse->weight = $weight;
+        $horse->save();
+        return $horse;
+    }
+}
+```
+
+## Service registration
+
+API Platform discovers providers and processors through Symfony's service container tags. Register them in `config/services.yml`:
+
+```yaml
+# config/services.yml
+services:
+  PrestaShop\Module\ApiModule\Repository\HorseRepository:
+    arguments:
+      - '@doctrine.dbal.default_connection'
+      - '%database_prefix%'
+
+  PrestaShop\Module\ApiModule\ApiPlatform\State\HorseProvider:
+    autowire: true
+    tags: [ 'api_platform.state_provider' ]
+
+  PrestaShop\Module\ApiModule\ApiPlatform\State\HorseProcessor:
+    autowire: true
+
+  PrestaShop\Module\ApiModule\ApiPlatform\State\CatProvider:
+    tags: [ 'api_platform.state_provider' ]
+
+  PrestaShop\Module\ApiModule\ApiPlatform\State\CatProcessor:
+    tags: [ 'api_platform.state_processor' ]
+```
+
+- `api_platform.state_provider` — marks a class as an API Platform state provider.
+- `api_platform.state_processor` — marks a class as an API Platform state processor.
+- `autowire: true` — lets Symfony inject `HorseRepository` automatically into `HorseProvider`.
+
+<Note>
+  API Platform resource classes (the DTOs) do **not** need to be registered as services. API Platform scans the namespace for classes annotated with `#[ApiResource]` automatically, as long as the module's `composer.json` declares the correct PSR-4 namespace mapping.
+</Note>
+
+## Installation
+
+<Steps>
+  <Step title="Copy the module">
+    Place the `api_module` directory inside your PrestaShop `modules/` folder. The directory name **must** match the module name (`api_module`).
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/api_module
+    composer install
+    ```
+    This generates the `vendor/autoload.php` required for PSR-4 class loading.
+  </Step>
+  <Step title="Install the module">
+    Either use the Back Office **Module Manager**, or run:
+    ```bash
+    php bin/console prestashop:module install api_module
+    ```
+    The `install()` method calls `DBInstaller::createTables()` to create the `horse` table.
+  </Step>
+  <Step title="Test the endpoints">
+    Use a tool like cURL or Postman. With an active API access token:
+    ```bash
+    # List all cats
+    curl -H "Authorization: Bearer <token>" https://your-shop.example/api/cats
+
+    # Create a horse
+    curl -X POST \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"name":"Spirit","coatColor":"palomino","weight":450}' \
+      https://your-shop.example/api/horses
+    ```
+  </Step>
+</Steps>
+
+## Endpoint summary
+
+| Method   | URL                    | Resource | Description              |
+|----------|------------------------|----------|--------------------------|
+| `GET`    | `/api/cats`            | Cat      | List all cats            |
+| `GET`    | `/api/cats/{uuid}`     | Cat      | Fetch one cat            |
+| `POST`   | `/api/cats`            | Cat      | Create a cat             |
+| `PUT`    | `/api/cats/{uuid}`     | Cat      | Replace a cat            |
+| `DELETE` | `/api/cats/{uuid}`     | Cat      | Delete a cat             |
+| `GET`    | `/api/horses`          | Horse    | List all horses          |
+| `GET`    | `/api/horses/{id}`     | Horse    | Fetch one horse          |
+| `POST`   | `/api/horses`          | Horse    | Create a horse           |
+| `PUT`    | `/api/horses/{id}`     | Horse    | Replace a horse          |
+| `DELETE` | `/api/horses/{id}`     | Horse    | Delete a horse           |
+
+<Tip>
+  The full OpenAPI specification for your shop's API — including all module-contributed resources — is available at `/api/docs` when the API is enabled.
+</Tip>

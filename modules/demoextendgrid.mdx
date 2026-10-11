@@ -1,0 +1,210 @@
+---
+title: "Add Custom Row Actions to an Existing Admin Grid"
+sidebarTitle: "Extend Grid"
+description: "Insert a new row action into the Orders admin grid using the actionOrdersGridDefinitionModifier hook and register JavaScript to handle the custom action."
+---
+
+The `demoextendgrid` module shows the canonical way to insert a new row action into any existing PrestaShop Back Office grid. It adds a **Mark** action to the Orders listing — a pinned inline button that fires an AJAX POST request when clicked. The same pattern applies to any grid that exposes an `actions` column: supply a hook implementation that receives the grid's `GridDefinitionInterface` and append a new `SubmitRowAction` to its row actions collection. A companion JavaScript file handles the AJAX call and provides visual feedback.
+
+<Note>
+This module requires **PrestaShop 9.0.0 or later** and Composer to install its autoloader.
+</Note>
+
+## Installation
+
+<Steps>
+  <Step title="Clone or download the module">
+    Place the module directory inside your PrestaShop `modules/` folder and ensure the folder is named `demoextendgrid`.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/demoextendgrid
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    Install via the Back Office Module Manager, or run:
+    ```bash
+    php bin/console prestashop:module install demoextendgrid
+    ```
+  </Step>
+</Steps>
+
+## The `actionOrdersGridDefinitionModifier` hook
+
+Every PrestaShop Back Office grid fires a `action{GridId}GridDefinitionModifier` hook when its definition is built. For the Orders grid the hook name is `actionOrdersGridDefinitionModifier`. The hook passes the `GridDefinitionInterface` object in `$params['definition']`, giving you full access to columns, filters, and row actions.
+
+The module's hook implementation finds the existing `actions` column, retrieves its `RowActionCollectionInterface`, and appends a new `SubmitRowAction`:
+
+```php
+// demoextendgrid.php
+public function hookActionOrdersGridDefinitionModifier(array $params): void
+{
+    /** @var GridDefinitionInterface $orderGridDefinition */
+    $orderGridDefinition = $params['definition'];
+
+    /** @var RowActionCollectionInterface $actionsCollection */
+    $actionsCollection = $this->getActionsColumn($orderGridDefinition)->getOptions()['actions'];
+    $actionsCollection->add(
+        // mark order is just an example of some custom action
+        (new SubmitRowAction('mark_order'))
+            ->setName($this->trans('Mark', [], 'Admin.Actions'))
+            ->setIcon('push_pin')
+            ->setOptions([
+                'route' => 'demo_admin_orders_mark_order',
+                'route_param_name' => 'orderId',
+                'route_param_field' => 'id_order',
+                // use this if you want to show the action inline instead of adding it to dropdown
+                'use_inline_display' => true,
+            ])
+    );
+}
+
+private function getActionsColumn(GridDefinitionInterface $gridDefinition): ColumnInterface
+{
+    try {
+        /** @var ColumnInterface $column */
+        foreach ($gridDefinition->getColumns() as $column) {
+            if ('actions' === $column->getId()) {
+                return $column;
+            }
+        }
+    } catch (ColumnNotFoundException $e) {
+        // It is possible that not every grid will have actions column.
+        // In this case you can create a new column or throw exception depending on your needs
+        throw $e;
+    }
+
+    throw new ColumnNotFoundException('actions column not found in grid definition');
+}
+```
+
+Key `SubmitRowAction` options:
+
+| Option | Value | Purpose |
+|---|---|---|
+| `route` | `demo_admin_orders_mark_order` | Symfony route name for the AJAX POST |
+| `route_param_name` | `orderId` | URL parameter name in the route definition |
+| `route_param_field` | `id_order` | Grid column whose value populates the URL parameter |
+| `use_inline_display` | `true` | Renders the button inline in the row rather than inside the dropdown |
+
+## The `DemoOrderController` handler
+
+The route `demo_admin_orders_mark_order` resolves to `DemoOrderController::markOrderAction`, which receives the `orderId` from the URL and returns a JSON response:
+
+```php
+// src/Controller/DemoOrderController.php
+namespace PrestaShop\Module\DemoExtendGrid\Controller;
+
+use PrestaShopBundle\Controller\Admin\PrestaShopAdminController;
+use Symfony\Component\HttpFoundation\Response;
+
+class DemoOrderController extends PrestaShopAdminController
+{
+    /**
+     * @param int $orderId
+     *
+     * @return Response
+     */
+    public function markOrderAction(int $orderId): Response
+    {
+        // Do what you need depending on use case
+        return $this->json(sprintf('Marked order %d', $orderId));
+    }
+}
+```
+
+The controller is a standard Symfony controller extending `PrestaShopAdminController`. In a real module, `markOrderAction` would perform the domain operation (update a status, write a log, etc.) and return an appropriate response.
+
+## Route definition
+
+The route is declared in `config/routes.yml`. The `orderId` path segment is constrained to digits so the router rejects non-numeric values automatically:
+
+```yaml
+# config/routes.yml
+demo_admin_orders_mark_order:
+  path: demoextendgrid/{orderId}/mark-order
+  methods: [POST]
+  defaults:
+    _controller: PrestaShop\Module\DemoExtendGrid\Controller\DemoOrderController::markOrderAction
+  requirements:
+      orderId: \d+
+```
+
+## Registering JavaScript for the admin grid
+
+The `SubmitRowAction` generates an HTML element with a `data-url` attribute pointing to the generated route URL, but it does not submit the form automatically in all contexts — the module provides its own JavaScript to handle the click event and issue the AJAX POST.
+
+JavaScript must only load on the Orders listing page, not on the order create or order view pages. The module uses the `hookActionAdminControllerSetMedia` hook and checks the current controller name and action:
+
+```php
+// demoextendgrid.php
+public function hookActionAdminControllerSetMedia(array $params)
+{
+    // check if it is orders controller
+    if ($this->context->controller->controller_name !== 'AdminOrders') {
+        return;
+    }
+    $action = Tools::getValue('action');
+
+    // check if it is orders index page (we want to skip if it is `order create` or `order view` page)
+    if ($action === 'vieworder' || $action === 'addorder') {
+        return;
+    }
+
+    // now we are sure it is Orders index (listing) page where we need our javascript
+    $this->context->controller->addJS('modules/' . $this->name . '/views/js/orders-listing.js');
+}
+```
+
+## The `orders-listing.js` event handler
+
+The JavaScript listens for clicks on `.grid-mark-row-link` and `.js-submit-row-action` elements, posts to the `data-url` of the clicked element, and marks the icon green on success:
+
+```javascript
+// views/js/orders-listing.js
+$(() => {
+  $(document).on('click', '.grid-mark-row-link, .js-submit-row-action', (event) => {
+    event.preventDefault();
+    var $currentTarget = $(event.currentTarget)
+    $.post($currentTarget.data('url')).then((response) => {
+      // For example we mark the icon by green color when the ajax succeeds
+      $currentTarget.find('i').addClass('text-success');
+      $.growl({ message: response });
+    });
+  });
+});
+```
+
+`$.growl` is PrestaShop's built-in notification helper — it shows a brief toast notification with the server's response message.
+
+## Service registration
+
+```yaml
+# config/services.yml
+services:
+  PrestaShop\Module\DemoExtendGrid\Controller\DemoOrderController:
+    autowire: true
+    autoconfigure: true
+```
+
+## Hook registration at install time
+
+The `Installer` class registers both hooks during module installation:
+
+```php
+// src/Install/Installer.php
+private function registerHooks(Module $module): bool
+{
+    $hooks = [
+        'actionOrderGridDefinitionModifier',
+        'actionAdminControllerSetMedia',
+    ];
+
+    return (bool) $module->registerHook($hooks);
+}
+```
+
+<Tip>
+The hook name in the installer uses `actionOrderGridDefinitionModifier` (without the trailing `s` on `Order`). In `demoextendgrid.php` the method is named `hookActionOrdersGridDefinitionModifier` (with an `s`). PrestaShop normalizes hook names at dispatch time, so both spellings resolve to the same hook. Always check the exact hook name in the PrestaShop source or devdocs to avoid confusion.
+</Tip>

@@ -1,0 +1,250 @@
+---
+title: "Extend the Supplier Form with Doctrine ORM and Image Upload"
+sidebarTitle: "Extend Supplier Form"
+description: "Insert an image upload field into the Supplier edit form and persist the uploaded image path using a Doctrine ORM entity and a custom uploader service."
+---
+
+The `demoextendsymfonyform2` module demonstrates a more advanced form extension scenario: adding a **file upload field** to the **Sell → Catalog → Suppliers** edit form and persisting the uploaded image path with a **Doctrine ORM** entity. Compared to [demoextendsymfonyform1](/modules/demoextendsymfonyform1) which uses a plain `ObjectModel` for a boolean field, this module shows how to use the full Doctrine entity lifecycle — including a dedicated uploader service, a repository, and a Twig partial for rendering the existing image with a delete action.
+
+## What the module adds
+
+- An **upload_image_file** `FileType` field in the Supplier edit form.
+- A `CustomContentType` widget that renders the currently saved image (with a delete button) when one already exists.
+- A `SupplierExtraImageUploader` service that validates, moves, and resizes the uploaded file.
+- A `SupplierExtraImage` Doctrine ORM entity that stores the image file name per supplier.
+- A `DemoSupplierController` with a delete action for removing the extra image.
+
+## Installation
+
+<Steps>
+  <Step title="Place the module">
+    Clone or download the module into the `modules/` directory of your PrestaShop installation. Ensure the directory is named `demoextendsymfonyform2`.
+  </Step>
+  <Step title="Install Composer dependencies">
+    ```bash
+    cd modules/demoextendsymfonyform2
+    composer install
+    ```
+  </Step>
+  <Step title="Install the module">
+    Enable it from **Back Office → Module Manager**, or run:
+    ```bash
+    php ./bin/console prestashop:module install demoextendsymfonyform2
+    ```
+    The `Installer` class registers all hooks and creates the database table during install.
+  </Step>
+</Steps>
+
+<Note>
+  PrestaShop 9.0.0 or later is required. Hook registration and table creation are managed by the `Installer` class rather than directly in the main module file.
+</Note>
+
+## Hook registration via Installer
+
+The module delegates `install()` and `uninstall()` to a dedicated `Installer` class, a cleaner separation than embedding SQL and hook calls in the main file:
+
+```php
+// src/Install/Installer.php
+private function registerHooks(Module $module): bool
+{
+    $hooks = [
+        'actionSupplierFormBuilderModifier',
+        'actionAfterCreateSupplierFormHandler',
+        'actionAfterUpdateSupplierFormHandler',
+    ];
+
+    return (bool) $module->registerHook($hooks);
+}
+```
+
+Hook names follow the same `action{block_prefix}FormBuilderModifier` / `actionAfterCreate{block_prefix}FormHandler` / `actionAfterUpdate{block_prefix}FormHandler` convention. Here `block_prefix` is `supplier`.
+
+## Adding the upload field to the Supplier form
+
+`hookActionSupplierFormBuilderModifier` adds two fields:
+
+1. **`upload_image_file`** — a standard `FileType` input for selecting a new file.
+2. **`image_file`** — a `CustomContentType` rendering a Twig partial when an image already exists.
+
+```php
+public function hookActionSupplierFormBuilderModifier(array $params)
+{
+    /** @var SupplierExtraImageRepository $supplierExtraImageRepository */
+    $supplierExtraImageRepository = $this->get(SupplierExtraImageRepository::class);
+
+    /** @var FormBuilderInterface $formBuilder */
+    $formBuilder = $params['form_builder'];
+    $formBuilder
+        ->add('upload_image_file', FileType::class, [
+            'label' => $this->trans('Upload image file', [], 'Modules.DemoExtendSymfonyForm'),
+            'required' => false,
+        ]);
+
+    /** @var SupplierExtraImage $supplierExtraImage */
+    $supplierExtraImage = $supplierExtraImageRepository->findOneBy(['supplierId' => $params['id']]);
+    if ($supplierExtraImage && file_exists(_PS_SUPP_IMG_DIR_ . $supplierExtraImage->getImageName())) {
+        $formBuilder
+            ->add('image_file', CustomContentType::class, [
+                'required' => false,
+                'template' => '@Modules/demoextendsymfonyform2/src/View/upload_image.html.twig',
+                'data' => [
+                    'supplierId' => $params['id'],
+                    'imageUrl' => self::SUPPLIER_EXTRA_IMAGE_PATH . $supplierExtraImage->getImageName(),
+                ],
+            ]);
+    }
+}
+```
+
+<Tip>
+  `CustomContentType` is a PrestaShop form type that renders a Twig template inline within the form. It is ideal for displaying non-editable contextual information such as a preview of the currently saved image.
+</Tip>
+
+## The Twig partial template
+
+The `upload_image.html.twig` template renders the preview image and a delete button that submits to the `DemoSupplierController` delete route:
+
+```twig
+<div class="form-group row mt-3">
+    <div class="col-sm">
+        <figure class="figure">
+            <img src="{{ imageUrl }}" class="figure-img img-fluid img-thumbnail">
+        </figure>
+        <div class="d-block">
+            <button class="btn btn-outline-danger btn-sm"
+                    type="submit"
+                    formaction="{{ path('admin_suppliers_delete_image', {'supplierId': supplierId}) }}"
+            >
+                <i class="material-icons">delete_forever</i>{{ 'Delete'|trans({}, 'Admin.Actions') }}
+            </button>
+        </div>
+    </div>
+</div>
+```
+
+The `formaction` attribute overrides the form's default submit target so only the delete action is triggered, leaving the rest of the supplier form intact.
+
+## Saving the uploaded image
+
+Both `hookActionAfterUpdateSupplierFormHandler` and `hookActionAfterCreateSupplierFormHandler` delegate to `uploadImage()`:
+
+```php
+private function uploadImage(array $params): void
+{
+    /** @var ImageUploaderInterface $supplierExtraImageUploader */
+    $supplierExtraImageUploader = $this->get(SupplierExtraImageUploader::class);
+
+    /** @var UploadedFile $uploadedFile */
+    $uploadedFile = $params['form_data']['upload_image_file'];
+
+    if ($uploadedFile instanceof UploadedFile) {
+        $supplierExtraImageUploader->upload($params['id'], $uploadedFile);
+    }
+}
+```
+
+The check for `instanceof UploadedFile` ensures the hook only acts when a new file was actually submitted — if the user did not select a file, `$uploadedFile` will be `null` and nothing happens.
+
+## The SupplierExtraImageUploader service
+
+The uploader implements `ImageUploaderInterface` and encapsulates the full upload workflow: validation → temp file creation → old image deletion → resize and move → repository update:
+
+```php
+public function upload($supplierId, UploadedFile $image): void
+{
+    $this->checkImageIsAllowedForUpload($image);
+    $tempImageName = $this->createTemporaryImage($image);
+    $this->deleteOldImage((int) $supplierId);
+
+    $originalImageName = $image->getClientOriginalName();
+    $destination = _PS_SUPP_IMG_DIR_ . $originalImageName;
+    $this->uploadFromTemp($tempImageName, $destination);
+    $this->supplierExtraImageRepository->upsertSupplierImageName((int) $supplierId, $originalImageName);
+}
+```
+
+Key steps:
+- **`checkImageIsAllowedForUpload`** — validates file size against `Tools::getMaxUploadSize()` and checks extension/MIME type via `ImageManager`.
+- **`createTemporaryImage`** — moves the uploaded file to `_PS_TMP_IMG_DIR_` using `move_uploaded_file`.
+- **`uploadFromTemp`** — resizes the image via `ImageManager::resize()` and moves it to `_PS_SUPP_IMG_DIR_`.
+- **`upsertSupplierImageName`** — inserts or updates the `SupplierExtraImage` record.
+
+<Warning>
+  `checkImageIsAllowedForUpload` also guards against null byte injection (`%00`) in the original file name. Always validate uploaded file names before using them in filesystem operations.
+</Warning>
+
+## The SupplierExtraImage Doctrine entity
+
+The entity stores the relationship between a supplier ID and the image file name:
+
+```php
+namespace PrestaShop\Module\DemoExtendSymfonyForm\Entity;
+
+use Doctrine\ORM\Mapping as ORM;
+
+/**
+ * @ORM\Table()
+ * @ORM\Entity(repositoryClass="PrestaShop\Module\DemoExtendSymfonyForm\Repository\SupplierExtraImageRepository")
+ */
+class SupplierExtraImage
+{
+    /**
+     * @ORM\Id
+     * @ORM\Column(name="id_extra_image", type="integer")
+     * @ORM\GeneratedValue(strategy="AUTO")
+     */
+    private int $id;
+
+    /**
+     * @ORM\Column(name="id_supplier", type="integer")
+     */
+    private int $supplierId;
+
+    /**
+     * @ORM\Column(type="string")
+     */
+    private string $imageName;
+
+    // getters and setters ...
+}
+```
+
+Doctrine ORM annotations define the table schema. The `Installer` class creates the table directly with SQL (`SqlQueries::installQueries()`) rather than relying on Doctrine's schema tool, which keeps the install/uninstall cycle predictable.
+
+## The DemoSupplierController — deleting an image
+
+The controller handles the delete action triggered by the Twig button:
+
+```php
+public function deleteExtraImageAction(
+    int $supplierId,
+    SupplierExtraImageRepository $supplierExtraImageRepository
+): RedirectResponse
+{
+    try {
+        $this->deleteExtraUploadedImage($supplierId, $supplierExtraImageRepository);
+        $this->addFlash('success', $this->trans('The image was successfully deleted.', [], 'Admin.Notifications.Success'));
+    } catch (SupplierException $e) {
+        $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
+    }
+
+    return $this->redirectToRoute('admin_suppliers_edit', ['supplierId' => $supplierId]);
+}
+```
+
+The private `deleteExtraUploadedImage` checks whether any other supplier shares the same image file before calling `unlink()`, preventing orphaned file deletions.
+
+## ObjectModel vs Doctrine ORM comparison
+
+| Aspect | demoextendsymfonyform1 | demoextendsymfonyform2 (this module) |
+|---|---|---|
+| Persistence layer | `ObjectModel` | Doctrine ORM entity |
+| Schema management | Manual SQL in `install()` | SQL via `Installer` + `SqlQueries` class |
+| Data access | Custom DBAL repository | Doctrine `EntityRepository` |
+| Field type | Boolean toggle | Image file upload |
+| Extra services needed | None beyond repository | `SupplierExtraImageUploader` |
+| Use when | Simple typed fields | File handling, Doctrine-aware codebase |
+
+<Note>
+  Doctrine ORM is the recommended persistence approach when your module manages complex object graphs, needs lazy loading, or benefits from the Doctrine repository pattern. For a simpler boolean or text field, the ObjectModel approach in [demoextendsymfonyform1](/modules/demoextendsymfonyform1) requires less setup.
+</Note>

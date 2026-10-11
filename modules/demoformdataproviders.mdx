@@ -1,0 +1,198 @@
+---
+title: "Use Form Data Provider Hooks for Lightweight Field Extension"
+sidebarTitle: "Form Data Providers"
+description: "Inject custom default values and override form data using FormDataProviderData and FormDataProviderDefaultData hooks without Doctrine entities or ObjectModel."
+---
+
+The `demoformdataproviders` module demonstrates the lightest-weight approach to modifying data loaded into a PrestaShop Back Office form: the **FormDataProvider hook pair**. Rather than restructuring the form builder or adding new fields, these hooks let you intercept the data array that a form's data provider has already assembled and modify specific values in place — before the form renders. No Doctrine entities, no ObjectModel subclass, and no new form type definitions are needed. The module uses the Product form as its example target, automatically prepending a `NEWMPNPREFIX_` prefix to the MPN (Manufacturer Part Number) field under **Details → References**.
+
+<Note>
+  This pattern modifies the **data** supplied to an existing form field, not the form structure itself. Use it when you want to set default values or transform loaded data. If you need to add new fields, add columns to a grid, or persist custom data, use the identifiable object hook pattern demonstrated in [demoextendsymfonyform1](/modules/demoextendsymfonyform1) instead.
+</Note>
+
+## What the module does
+
+- `actionProductFormDataProviderDefaultData` — sets `NEWMPNPREFIX_` as the default value of the `details.references.mpn` field for **new** products.
+- `actionProductFormDataProviderData` — prepends `NEWMPNPREFIX_` to the existing MPN value for **existing** products, but only when the prefix is not already present.
+
+## Installation
+
+<Steps>
+  <Step title="Place the module">
+    Clone or download the module into the `modules/` directory of your PrestaShop installation. The directory must be named `demoformdataproviders`.
+  </Step>
+  <Step title="Install the module">
+    No Composer dependencies are required. Enable it from **Back Office → Module Manager**, or run:
+    ```bash
+    php ./bin/console prestashop:module install demoformdataproviders
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The module is compatible with PrestaShop 8.0.0 and later. No database tables are created — this pattern is purely in-memory data transformation.
+</Note>
+
+## Hook registration
+
+Both hooks are registered in `install()`:
+
+```php
+public function install()
+{
+    if (!parent::install()) {
+        return false;
+    }
+
+    return $this->registerHook('actionProductFormDataProviderData')
+        && $this->registerHook('actionProductFormDataProviderDefaultData');
+}
+```
+
+## How the hooks work
+
+### actionProductFormDataProviderDefaultData
+
+This hook fires when a **new** product form is initialised. The `$params['data']` array contains the default values the data provider returns for each field. You modify it in place (by reference via the array):
+
+```php
+public function hookActionProductFormDataProviderDefaultData(array $params): void
+{
+    // set a prefix as default value for field "details > references > mpn"
+    $newMpnPrefix = $this->getNewMpnPrefix();
+    $params["data"]["details"]["references"]["mpn"] = $newMpnPrefix;
+}
+```
+
+After this hook runs, the MPN input in a new product form will be pre-filled with `NEWMPNPREFIX_`.
+
+### actionProductFormDataProviderData
+
+This hook fires when an **existing** product is loaded for editing. The `$params['data']` array contains the values read from the database. The module checks whether the prefix is already present before modifying, making the operation idempotent:
+
+```php
+public function hookActionProductFormDataProviderData(array $params): void
+{
+    // add a prefix for field "details > references > mpn" if not prefixed
+    $actualMpn = $params["data"]["details"]["references"]["mpn"];
+
+    $newMpnPrefix = $this->getNewMpnPrefix();
+    if (substr($actualMpn, 0, strlen($newMpnPrefix)) !== $newMpnPrefix) {
+        $params["data"]["details"]["references"]["mpn"] = $newMpnPrefix . $actualMpn;
+    }
+}
+
+public function getNewMpnPrefix(): string
+{
+    return "NEWMPNPREFIX_";
+}
+```
+
+<Tip>
+  The idempotency check (`substr(...) !== $newMpnPrefix`) is important. Without it, loading and saving a product repeatedly would keep prepending the prefix, eventually corrupting the MPN value.
+</Tip>
+
+## Hook naming convention
+
+FormDataProvider hooks follow this pattern:
+
+```
+action{FormName}FormDataProvider{Variant}
+```
+
+Where:
+- `{FormName}` is the camel-cased form name (e.g. `Product`, `Customer`, `Supplier`).
+- `{Variant}` is either `Data` (for existing records) or `DefaultData` (for new records).
+
+Examples:
+- `actionProductFormDataProviderData`
+- `actionProductFormDataProviderDefaultData`
+- `actionCustomerFormDataProviderData`
+- `actionSupplierFormDataProviderDefaultData`
+
+## Testing the module
+
+1. Go to **Catalog → Products** and click **New Product**.
+2. Open the **Details** tab and check **References → MPN** — it should be pre-filled with `NEWMPNPREFIX_`.
+3. Save the product and reopen it — the MPN should still have the prefix.
+4. Manually remove the prefix from MPN, save, and reopen — the prefix is automatically re-added.
+
+## Comparison: FormDataProviders vs other form extension patterns
+
+| Aspect | FormDataProvider hooks | Identifiable object hooks (demoextendsymfonyform1–3) | Product CQRS builder (demoproductform) |
+|---|---|---|---|
+| **Adds new fields** | No | Yes | Yes |
+| **Modifies existing field data** | Yes | Yes (via `$params['data']`) | Via command handler |
+| **Requires new database table** | No | Yes | Yes |
+| **Requires Symfony form type** | No | Yes | Yes |
+| **Save hook needed** | No | Yes | Via `ProductCommandsBuilderInterface` |
+| **Complexity** | Very low | Medium | Medium–high |
+| **Best for** | Defaults, data transformation | New fields on any Back Office form | New fields on the Product form |
+| **Compatible with** | PS 8.0.0+ | PS 9.0.0+ | PS 9.0.0+ |
+
+<Note>
+  FormDataProvider hooks give you read/transform access to the data array only. They cannot add new form fields, persist data, or interact with the grid. For those needs, use the identifiable object hooks shown in [demoextendsymfonyform1](/modules/demoextendsymfonyform1), [demoextendsymfonyform2](/modules/demoextendsymfonyform2), or [demoextendsymfonyform3](/modules/demoextendsymfonyform3).
+</Note>
+
+## Complete module source
+
+Because this module requires no services, no entities, and no extra config files, the entire logic fits in the main PHP file:
+
+```php
+class DemoFormDataProviders extends Module
+{
+    public function __construct()
+    {
+        $this->name = 'demoformdataproviders';
+        $this->author = 'PrestaShop';
+        $this->version = '1.0.0';
+        $this->ps_versions_compliancy = ['min' => '8.0.0', 'max' => '9.99.99'];
+
+        parent::__construct();
+
+        $this->displayName = $this->trans('DemoFormDataProviders', [], 'Modules.DemoFormDataProviders.Config');
+        $this->description = $this->trans('DemoFormDataProviders module description', [], 'Modules.DemoFormDataProviders.Config');
+    }
+
+    public function install()
+    {
+        if (!parent::install()) {
+            return false;
+        }
+
+        return $this->registerHook('actionProductFormDataProviderData')
+            && $this->registerHook('actionProductFormDataProviderDefaultData');
+    }
+
+    public function uninstall()
+    {
+        if (!parent::uninstall()) {
+            return false;
+        }
+        return true;
+    }
+
+    public function hookActionProductFormDataProviderDefaultData(array $params): void
+    {
+        $newMpnPrefix = $this->getNewMpnPrefix();
+        $params["data"]["details"]["references"]["mpn"] = $newMpnPrefix;
+    }
+
+    public function hookActionProductFormDataProviderData(array $params): void
+    {
+        $actualMpn = $params["data"]["details"]["references"]["mpn"];
+
+        $newMpnPrefix = $this->getNewMpnPrefix();
+        if (substr($actualMpn, 0, strlen($newMpnPrefix)) !== $newMpnPrefix) {
+            $params["data"]["details"]["references"]["mpn"] = $newMpnPrefix . $actualMpn;
+        }
+    }
+
+    public function getNewMpnPrefix(): string
+    {
+        return "NEWMPNPREFIX_";
+    }
+}
+```
+
+The simplicity of this module makes it an ideal starting point when you only need to influence form field values without introducing architectural complexity.

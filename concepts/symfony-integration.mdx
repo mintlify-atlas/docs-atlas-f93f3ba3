@@ -1,0 +1,479 @@
+---
+title: "Symfony Integration Patterns in PrestaShop Modules"
+sidebarTitle: "Symfony Integration"
+description: "How PrestaShop modules plug into the Symfony DI container, register services, define routes, and use Symfony form types and controllers."
+---
+
+PrestaShop 9 runs its Back Office on a full Symfony application stack. Modules can participate as first-class citizens in that stack: registering services in the DI container, defining Symfony routes, extending forms, subscribing to kernel events, and dispatching commands through a CQRS command bus. This page explains each of those integration points using real code from the official example modules.
+
+## How PrestaShop Loads Module Services
+
+When the Symfony container is compiled, PrestaShop scans every **active** module directory for a file at `config/services.yml`. If the file exists, its contents are merged into the main container. Your services, parameters, and imports all become part of the same DI graph as PrestaShop's own services.
+
+<Note>
+Services must be tagged or typed correctly to participate in specific Symfony subsystems. For example, a form type must carry the `form.type` tag, an event subscriber must implement `EventSubscriberInterface` (which triggers the `kernel.event_subscriber` tag via `autoconfigure: true`), and a command handler must use the `#[AsCommandHandler]` attribute or equivalent tag.
+</Note>
+
+The minimal `services.yml` for a module with controllers:
+
+```yaml
+services:
+  PrestaShop\Module\DemoControllerTabs\Controller\Admin\ConfigureController:
+    autowire: true
+    autoconfigure: true
+
+  PrestaShop\Module\DemoControllerTabs\Controller\Admin\ManualTabController:
+    autowire: true
+    autoconfigure: true
+
+  PrestaShop\Module\DemoControllerTabs\Controller\Admin\MinimalistController:
+    autowire: true
+    autoconfigure: true
+
+  PrestaShop\Module\DemoControllerTabs\Controller\Admin\SecuredController:
+    autowire: true
+    autoconfigure: true
+```
+
+`autoconfigure: true` is the key setting—it inspects each class's interfaces and attributes and automatically applies the correct tags. An `EventSubscriberInterface` implementation gets `kernel.event_subscriber`, a command handler with `#[AsCommandHandler]` gets registered with the command bus, and so on.
+
+## Routing via config/routes.yml
+
+Each Symfony controller action is mapped to a URL path in `config/routes.yml`. PrestaShop loads this file automatically for active modules and prefixes the routes with a module-specific path segment.
+
+```yaml
+# @see https://devdocs.prestashop-project.org/9/modules/concepts/controllers/admin-controllers/
+ps_controller_tabs_configure:
+    path: /configure-tabs
+    methods: [GET]
+    defaults:
+        _controller: 'PrestaShop\Module\DemoControllerTabs\Controller\Admin\ConfigureController::indexAction'
+        _legacy_controller: 'AdminDemoControllerTabsConfigure'
+        _legacy_link: 'AdminDemoControllerTabsConfigure'
+
+ps_controller_tabs_minimalist:
+    path: /configure-tabs/minimalist
+    methods: [GET]
+    defaults:
+        _controller: 'PrestaShop\Module\DemoControllerTabs\Controller\Admin\MinimalistController::indexAction'
+
+ps_controller_tabs_secured:
+    path: /configure-tabs/secured
+    methods: [GET]
+    defaults:
+        _controller: 'PrestaShop\Module\DemoControllerTabs\Controller\Admin\SecuredController::indexAction'
+        _legacy_controller: 'AdminDemoControllerTabsSecured'
+
+ps_controller_tabs_manual_tab:
+    path: /configure-tabs/manual_tab
+    methods: [GET]
+    defaults:
+        _controller: 'PrestaShop\Module\DemoControllerTabs\Controller\Admin\ManualTabController::indexAction'
+```
+
+The `_legacy_controller` and `_legacy_link` default parameters bridge the Symfony router with PrestaShop's legacy `AdminController` link generation. Adding `_legacy_controller` allows `$context->link->getAdminLink('AdminDemoControllerTabsConfigure')` to resolve to the correct Symfony route, maintaining backward compatibility with any code that uses the legacy link API.
+
+## Symfony AbstractAdminController
+
+Module admin controllers extend `PrestaShopBundle\Controller\Admin\PrestaShopAdminController` (previously `AbstractAdminController` in older versions). This base class provides:
+
+- Access to the Symfony DI container via `$this->get()`
+- Helper methods for rendering Twig templates via `$this->render()`
+- Access to the command and query buses
+- Integration with PrestaShop's security layer
+
+Here is the `ConfigureController` from the `democontrollertabs` module:
+
+```php
+declare(strict_types=1);
+
+namespace PrestaShop\Module\DemoControllerTabs\Controller\Admin;
+
+use PrestaShopBundle\Controller\Admin\PrestaShopAdminController;
+use PrestaShopBundle\Security\Attribute\AdminSecurity;
+use Symfony\Component\HttpFoundation\Response;
+
+class ConfigureController extends PrestaShopAdminController
+{
+    public const TAB_CLASS_NAME = 'AdminDemoControllerTabsConfigure';
+
+    #[AdminSecurity("is_granted('read', request.get('_legacy_controller'))")]
+    public function indexAction(): Response
+    {
+        return $this->render('@Modules/democontrollertabs/views/templates/admin/configure.html.twig');
+    }
+}
+```
+
+The `#[AdminSecurity]` attribute enforces PrestaShop's Back Office permission system. The expression `is_granted('read', request.get('_legacy_controller'))` checks that the currently logged-in employee has read access to the controller identified by `_legacy_controller` in the route defaults.
+
+## Tab Registration for Controllers
+
+Tabs appear in the Back Office sidebar and link to module controller routes. PrestaShop supports two approaches for registering them.
+
+### Automatic Registration via $this->tabs
+
+Declaring a `$this->tabs` array in the module constructor is the preferred approach. PrestaShop reads this property during `install()` and creates the `Tab` records automatically:
+
+```php
+public function __construct()
+{
+    $this->name = 'democontrollertabs';
+    // ... other properties ...
+
+    parent::__construct();
+
+    // ... displayName, description ...
+
+    $tabNames = [];
+    foreach (Language::getLanguages(true) as $lang) {
+        $tabNames[$lang['locale']] = $this->trans('Demo Controller Tabs', [], 'Modules.Democontrollertabs.Admin', $lang['locale']);
+    }
+    $this->tabs = [
+        [
+            'route_name' => 'ps_controller_tabs_configure',
+            'class_name' => ConfigureController::TAB_CLASS_NAME,
+            'visible' => true,
+            'name' => $tabNames,
+            'icon' => 'school',
+            'parent_class_name' => 'IMPROVE',
+        ],
+    ];
+}
+```
+
+Tab definition keys:
+
+| Key | Description |
+|---|---|
+| `route_name` | The Symfony route name defined in `config/routes.yml` |
+| `class_name` | The legacy controller class name (used as identifier) |
+| `visible` | Whether the tab appears in the sidebar (`false` = hidden but still accessible) |
+| `name` | Associative array of `locale => label` for each installed language |
+| `icon` | Material Design icon name |
+| `parent_class_name` | Parent menu item (`IMPROVE`, `SELL`, `CONFIGURE`, etc.) |
+
+### Manual Registration
+
+For tabs that need more complex setup (e.g., programmatic parent selection), you can create `Tab` objects directly in `install()`:
+
+```php
+private function manuallyInstallTab(): bool
+{
+    $controllerClassName = ManualTabController::TAB_CLASS_NAME;
+    $tabId = (int) Tab::getIdFromClassName($controllerClassName);
+    if (!$tabId) {
+        $tabId = null;
+    }
+
+    $tab = new Tab($tabId);
+    $tab->active = 1;
+    $tab->class_name = $controllerClassName;
+    $tab->route_name = 'ps_controller_tabs_manual_tab';
+    $tab->name = [];
+    foreach (Language::getLanguages() as $lang) {
+        $tab->name[$lang['id_lang']] = $this->trans('Manual Tab controller', [], 'Modules.Democontrollertabs.Admin', $lang['locale']);
+    }
+    $tab->icon = 'build';
+    $tab->id_parent = (int) Tab::getIdFromClassName('IMPROVE');
+    $tab->module = $this->name;
+
+    return (bool) $tab->save();
+}
+```
+
+## FormDataProvider / FormDataHandler Pattern
+
+PrestaShop's `IdentifiableObject` form system separates reading form data from writing it through two interfaces:
+
+- **`FormDataProviderInterface`** — fills the form with existing data (e.g., for an edit page)
+- **`FormDataHandlerInterface`** — persists form data when the form is submitted
+
+Both are registered as services and wired into a `FormBuilder` and `FormHandler` factory respectively. The `demodoctrine` module wires this in `services.yml`:
+
+```yaml
+Module\DemoDoctrine\Form\QuoteFormDataProvider: ~
+
+prestashop.module.demodoctrine.form.identifiable_object.builder.quote_form_builder:
+    class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilder'
+    factory: [ '@prestashop.core.form.builder.form_builder_factory', 'create' ]
+    arguments:
+        - 'Module\DemoDoctrine\Form\QuoteType'
+        - '@Module\DemoDoctrine\Form\QuoteFormDataProvider'
+
+Module\DemoDoctrine\Form\QuoteFormDataHandler: ~
+
+prestashop.module.demodoctrine.form.identifiable_object.handler.quote_form_handler:
+    class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandler'
+    factory: [ '@prestashop.core.form.identifiable_object.handler.form_handler_factory', 'create' ]
+    arguments:
+        - '@Module\DemoDoctrine\Form\QuoteFormDataHandler'
+```
+
+The controller injects these two services and uses them in the standard create/edit action flow: build the form → pass to template → on POST, handle it → redirect.
+
+## CQRS: Commands, Queries, and Handlers
+
+The Command Query Responsibility Segregation (CQRS) pattern separates write operations (Commands) from read operations (Queries), each handled by a dedicated handler class. PrestaShop's core uses this pattern extensively and exposes two buses: `prestashop.core.command_bus` and `prestashop.core.query_bus`.
+
+The `demoextendsymfonyform3` module demonstrates a full CQRS implementation for a `Reviewer` entity.
+
+### Command
+
+A command is a plain PHP object carrying the intent and its required data. It validates its own value objects in the constructor:
+
+```php
+namespace DemoCQRSHooksUsage\Domain\Reviewer\Command;
+
+use PrestaShop\PrestaShop\Core\Domain\Customer\ValueObject\CustomerId;
+
+/**
+ * Used for toggling the customer if is allowed to make a review.
+ *
+ * @see \DemoCQRSHooksUsage\Domain\Reviewer\CommandHandler\ToggleIsAllowedToReviewHandler
+ */
+class ToggleIsAllowedToReviewCommand
+{
+    private CustomerId $customerId;
+
+    public function __construct(int $customerId)
+    {
+        $this->customerId = new CustomerId($customerId);
+    }
+
+    public function getCustomerId(): CustomerId
+    {
+        return $this->customerId;
+    }
+}
+```
+
+### Command Handler
+
+The handler carries the `#[AsCommandHandler]` attribute so `autoconfigure: true` automatically registers it with the command bus. It receives the command, loads the entity, and persists the change:
+
+```php
+namespace DemoCQRSHooksUsage\Domain\Reviewer\CommandHandler;
+
+use DemoCQRSHooksUsage\Domain\Reviewer\Command\ToggleIsAllowedToReviewCommand;
+use DemoCQRSHooksUsage\Domain\Reviewer\Exception\CannotToggleAllowedToReviewStatusException;
+use DemoCQRSHooksUsage\Entity\Reviewer;
+use DemoCQRSHooksUsage\Repository\ReviewerRepository;
+use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
+
+#[AsCommandHandler]
+class ToggleIsAllowedToReviewHandler extends AbstractReviewerHandler
+{
+    public function __construct(
+        private readonly ReviewerRepository $reviewerRepository
+    ) {
+    }
+
+    public function handle(ToggleIsAllowedToReviewCommand $command): void
+    {
+        $reviewerId = $this->reviewerRepository->findIdByCustomer($command->getCustomerId()->getValue());
+
+        $reviewer = new Reviewer($reviewerId);
+
+        if (0 >= $reviewer->id) {
+            $reviewer = $this->createReviewer($command->getCustomerId()->getValue());
+        }
+
+        $reviewer->is_allowed_for_review = (bool) !$reviewer->is_allowed_for_review;
+
+        try {
+            if (false === $reviewer->update()) {
+                throw new CannotToggleAllowedToReviewStatusException(
+                    sprintf('Failed to change status for reviewer with id "%s"', $reviewer->id)
+                );
+            }
+        } catch (PrestaShopException $exception) {
+            throw new CannotToggleAllowedToReviewStatusException(
+                'An unexpected error occurred when updating reviewer status'
+            );
+        }
+    }
+}
+```
+
+### Query and Query Handler
+
+Queries follow the same pattern but return data instead of producing side effects. The handler is annotated with `#[AsQueryHandler]`:
+
+```php
+// Query
+namespace DemoCQRSHooksUsage\Domain\Reviewer\Query;
+
+use PrestaShop\PrestaShop\Core\Domain\Customer\ValueObject\CustomerId;
+
+class GetReviewerSettingsForForm
+{
+    private ?CustomerId $customerId;
+
+    public function __construct(?int $customerId)
+    {
+        $this->customerId = null !== $customerId ? new CustomerId((int) $customerId) : null;
+    }
+
+    public function getCustomerId(): ?CustomerId
+    {
+        return $this->customerId;
+    }
+}
+```
+
+```php
+// Query Handler
+namespace DemoCQRSHooksUsage\Domain\Reviewer\QueryHandler;
+
+use DemoCQRSHooksUsage\Domain\Reviewer\Query\GetReviewerSettingsForForm;
+use DemoCQRSHooksUsage\Domain\Reviewer\QueryResult\ReviewerSettingsForForm;
+use DemoCQRSHooksUsage\Repository\ReviewerRepository;
+use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
+
+#[AsQueryHandler]
+class GetReviewerSettingsForFormHandler
+{
+    public function __construct(
+        private readonly ReviewerRepository $reviewerRepository
+    ) {
+    }
+
+    public function handle(GetReviewerSettingsForForm $query)
+    {
+        if (null === $query->getCustomerId()) {
+            return new ReviewerSettingsForForm(false);
+        }
+
+        return new ReviewerSettingsForForm(
+            $this->reviewerRepository->getIsAllowedToReviewStatus($query->getCustomerId()->getValue())
+        );
+    }
+}
+```
+
+Dispatching from a hook method (using the query bus):
+
+```php
+$queryBus = $this->get('prestashop.core.query_bus');
+$reviewerSettings = $queryBus->handle(new GetReviewerSettingsForForm($params['id']));
+$params['data']['is_allowed_for_review'] = $reviewerSettings->isAllowedForReview();
+```
+
+The corresponding services.yml entries for CQRS handlers (must have `autoconfigure: true` so the `#[AsCommandHandler]` / `#[AsQueryHandler]` attributes are picked up):
+
+```yaml
+services:
+  _defaults:
+    public: true
+
+  democqrshooksusage.domain.reviewer.command_handler.toggle_is_allowed_to_review_handler:
+    class: 'DemoCQRSHooksUsage\Domain\Reviewer\CommandHandler\ToggleIsAllowedToReviewHandler'
+    autowire: true
+    autoconfigure: true
+
+  democqrshooksusage.domain.reviewer.query_handler.get_reviewer_settings_for_form_handler:
+    class: 'DemoCQRSHooksUsage\Domain\Reviewer\QueryHandler\GetReviewerSettingsForFormHandler'
+    autowire: true
+    autoconfigure: true
+```
+
+## EventSubscriber Pattern
+
+Event subscribers let you react to Symfony kernel events (not PrestaShop hooks) to intercept or modify controller execution. The `demoextendtemplates` module uses an `OrderControllerSubscriber` to intercept the `KernelEvents::CONTROLLER` event and either inject flash messages or block actions entirely:
+
+```php
+declare(strict_types=1);
+
+namespace PrestaShop\Module\DemoExtendTemplates\EventSubscriber;
+
+use PrestaShopBundle\Controller\Admin\Sell\Order\OrderController;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpKernel\Event\ControllerEvent;
+use Symfony\Component\HttpKernel\KernelEvents;
+
+class OrderControllerSubscriber implements EventSubscriberInterface
+{
+    public function __construct(
+        private readonly RequestStack $requestStack,
+        private readonly LoggerInterface $logger,
+    ) {
+    }
+
+    public static function getSubscribedEvents(): array
+    {
+        return [
+            KernelEvents::CONTROLLER => 'onController',
+        ];
+    }
+
+    private function onIndexAction(): void
+    {
+        $this->requestStack->getSession()->getFlashBag()->add(
+            'demoextendtemplates-success',
+            'Custom success flash from demoextendtemplates module'
+        );
+    }
+
+    private function onDeleteProductAction(ControllerEvent $event): void
+    {
+        $request = $event->getRequest();
+
+        $this->logger->warning('Attempt to delete a product from an order was blocked.', [
+            'orderId' => $request->attributes->get('orderId'),
+            'orderDetailId' => $request->attributes->get('orderDetailId'),
+        ]);
+
+        $event->setController(
+            fn () => new JsonResponse(
+                ['message' => 'Deleting products from orders is not allowed.'],
+                Response::HTTP_FORBIDDEN
+            )
+        );
+    }
+
+    public function onController(ControllerEvent $event): void
+    {
+        $controller = $event->getController();
+
+        if (!is_array($controller)) {
+            return;
+        }
+
+        [$instance, $method] = $controller;
+
+        if (!$instance instanceof OrderController) {
+            return;
+        }
+
+        match ($method) {
+            'indexAction' => $this->onIndexAction(),
+            'deleteProductAction' => $this->onDeleteProductAction($event),
+            default => null,
+        };
+    }
+}
+```
+
+To enable it, uncomment the service entry in `services.yml`:
+
+```yaml
+services:
+  # Alternative approach using an event subscriber - simpler and more maintainable,
+  # but does not allow modifying the controller's return value or its injected arguments.
+  PrestaShop\Module\DemoExtendTemplates\EventSubscriber\OrderControllerSubscriber:
+    autowire: true
+    autoconfigure: true
+```
+
+<Note>
+Because `autoconfigure: true` is set, Symfony detects that `OrderControllerSubscriber` implements `EventSubscriberInterface` and automatically tags it with `kernel.event_subscriber`. You do not need to add the tag manually. The `getSubscribedEvents()` static method is called by the event dispatcher to determine which events this subscriber listens to.
+</Note>
+
+<Tip>
+Event subscribers are more powerful than PrestaShop hooks for intercepting Symfony controller execution because they can replace the controller callable entirely (`$event->setController(...)`) or modify the `Request` object before the controller runs. Use hooks for standard PrestaShop extension points and event subscribers for Symfony-layer interception.
+</Tip>

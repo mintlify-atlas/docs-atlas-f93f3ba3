@@ -1,0 +1,289 @@
+---
+title: "Using Hooks to Extend PrestaShop Behavior"
+sidebarTitle: "Hooks"
+description: "Learn how PrestaShop hooks work, how to register them in your module, and which hooks are most useful for admin and front-office customization."
+---
+
+Hooks are the primary extension mechanism in PrestaShop. At carefully chosen points throughout the request lifecycle—rendering a page section, saving a form, building a grid, adding action buttons—PrestaShop dispatches a named hook event. Any active module that has registered for that hook and defined the corresponding method will be called. This lets you inject HTML, modify data structures, or replace behavior entirely without touching a single line of core code.
+
+## Two Categories of Hooks
+
+<CardGroup cols={2}>
+  <Card title="Display Hooks" icon="display">
+    Return an HTML string that PrestaShop injects into the page at the hook location. The method **must return a string**. Returning `null` or `void` results in nothing being rendered. Examples: `displayHome`, `displayAdminOrderSide`, `displayAdminOrderTabContent`.
+  </Card>
+  <Card title="Action Hooks" icon="bolt">
+    Called to modify data, trigger side-effects, or intercept behavior. Parameters are passed by reference so you can mutate them in place. These hooks return nothing meaningful—PrestaShop ignores the return value. Examples: `actionGetAdminOrderButtons`, `actionProductFormBuilderModifier`, `actionCustomerGridDefinitionModifier`.
+  </Card>
+</CardGroup>
+
+## Registering Hooks in install()
+
+Hooks are registered by calling `$this->registerHook()` inside `install()`. You can pass a single string or an array of hook names. The registration is stored in the `ps_hook_module` database table.
+
+```php
+public function install()
+{
+    if (!parent::install()) {
+        return false;
+    }
+
+    $installer = InstallerFactory::create();
+
+    return $installer->install($this);
+}
+```
+
+For modules with many hooks, it is good practice to delegate registration to a dedicated `Installer` class (as the `demovieworderhooks` module does):
+
+```php
+private function registerHooks(Module $module): bool
+{
+    // All hooks in the order view page.
+    $hooks = [
+        'displayAdminOrderTabContent',
+        'displayAdminOrderTabLink',
+        'displayAdminOrderMain',
+        'displayAdminOrderMainBottom',
+        'displayAdminOrderSide',
+        'displayAdminOrderSideBottom',
+        'displayAdminOrder',
+        'displayOrderPreview',
+        'displayAdminOrderTop',
+        'displayAdminOrderCreateExtraButtons',
+        'actionGetAdminOrderButtons',
+    ];
+
+    return (bool) $module->registerHook($hooks);
+}
+```
+
+<Warning>
+Hooks registered in `install()` are **not** automatically unregistered on `uninstall()`. `parent::uninstall()` handles removal of all hook registrations for your module, so always call it in your `uninstall()` method.
+</Warning>
+
+## Naming Convention: Hook Name → Method Name
+
+PrestaShop resolves which method to call by prefixing the hook name with `hook` and capitalizing the first letter of the hook name. The mapping is straightforward:
+
+| Hook name | PHP method to implement |
+|---|---|
+| `displayHome` | `hookDisplayHome` |
+| `displayAdminOrderSide` | `hookDisplayAdminOrderSide` |
+| `actionGetAdminOrderButtons` | `hookActionGetAdminOrderButtons` |
+| `actionCustomerFormBuilderModifier` | `hookActionCustomerFormBuilderModifier` |
+
+The method must be `public` and receive `array $params` as its only argument (except for hooks that pass nothing).
+
+## Key Hooks from the Example Modules
+
+The following table summarizes the most instructive hooks demonstrated across the official example modules.
+
+| Hook name | Category | What it does | Demonstrated by |
+|---|---|---|---|
+| `displayHome` | Display | Injects HTML into the front-office homepage | `demodoctrine` |
+| `displayAdminOrderTabLink` | Display | Adds a tab link to the order detail page | `demovieworderhooks` |
+| `displayAdminOrderTabContent` | Display | Renders content for a custom order detail tab | `demovieworderhooks` |
+| `displayAdminOrderMain` | Display | Injects a block into the main column of the order view | `demovieworderhooks` |
+| `displayAdminOrderSide` | Display | Injects a block into the right sidebar of the order view | `demovieworderhooks` |
+| `actionGetAdminOrderButtons` | Action | Adds buttons to the order action bar | `demovieworderhooks` |
+| `actionProductFormBuilderModifier` | Action | Extends the product edit form with custom fields | `demoproductform` |
+| `actionCombinationFormFormBuilderModifier` | Action | Extends the product combination form | `demoproductform` |
+| `actionCustomerFormBuilderModifier` | Action | Extends the customer edit form with custom fields | `demoextendsymfonyform3` |
+| `actionFrontControllerSetVariables` | Action | Injects or modifies template variables on front-office pages | `demoseo` |
+
+## Real Hook Implementations
+
+### hookDisplayHome — Display Hook
+
+The `demodoctrine` module uses `displayHome` to render random quotes on the front-office homepage. It retrieves data from a Doctrine repository via the Symfony container, assigns it to Smarty, and fetches a `.tpl` template:
+
+```php
+public function hookDisplayHome()
+{
+    $repository = $this->get(QuoteRepository::class);
+    $langId = $this->context->language->id;
+    $quotes = $repository->getRandom($langId, 3);
+
+    $this->smarty->assign(['quotes' => $quotes]);
+
+    return $this->fetch('module:demodoctrine/views/templates/front/home.tpl');
+}
+```
+
+<Note>
+`$this->get()` resolves a service from the Symfony DI container. This works in any hook method because `Module` implements `ContainerAwareInterface`. The container is available from the moment the module is loaded on a page request.
+</Note>
+
+### hookDisplayAdminOrderSide — Display Hook (Twig)
+
+Admin Symfony pages use Twig instead of Smarty. The `demovieworderhooks` module uses the `twig` service directly for rendering:
+
+```php
+public function hookDisplayAdminOrderSide(array $params)
+{
+    /** @var OrderSignatureRepository $signatureRepository */
+    $signatureRepository = $this->get('prestashop.module.demovieworderhooks.repository.order_signature_repository');
+
+    /** @var OrderSignaturePresenter $signaturePresenter */
+    $signaturePresenter = $this->get('prestashop.module.demovieworderhooks.presenter.order_signature_presenter');
+
+    $signature = $signatureRepository->findOneByOrderId($params['id_order']);
+
+    if (!$signature) {
+        return '';
+    }
+
+    return $this->render($this->getModuleTemplatePath() . 'customer_signature.html.twig', [
+        'signature' => $signaturePresenter->present($signature, (int) $this->context->language->id),
+    ]);
+}
+```
+
+The private `render()` helper used throughout the module retrieves the `twig` service and calls `render()` on it:
+
+```php
+private function render(string $template, array $params = []): string
+{
+    /** @var \Twig\Environment $twig */
+    $twig = $this->get('twig');
+
+    return $twig->render($template, $params);
+}
+
+private function getModuleTemplatePath(): string
+{
+    return sprintf('@Modules/%s/views/templates/admin/', $this->name);
+}
+```
+
+### hookDisplayAdminOrderTabLink and hookDisplayAdminOrderTabContent
+
+These two hooks work as a pair. `displayAdminOrderTabLink` provides the clickable tab header, and `displayAdminOrderTabContent` provides the panel content shown when that tab is active:
+
+```php
+/**
+ * Display tracking tab link.
+ */
+public function hookDisplayAdminOrderTabLink(array $params)
+{
+    return $this->render($this->getModuleTemplatePath() . 'tracking_link.html.twig');
+}
+
+/**
+ * Display shipment tracking information.
+ */
+public function hookDisplayAdminOrderTabContent(array $params)
+{
+    /** @var PackageLocationRepository $locationRepository */
+    $locationRepository = $this->get('prestashop.module.demovieworderhooks.repository.package_location_repository');
+
+    $locations = $locationRepository->findBy(
+        ['orderId' => $params['id_order']],
+        ['position' => 'asc']
+    );
+
+    /** @var PackageLocationsPresenter $locationsPresenter */
+    $locationsPresenter = $this->get('prestashop.module.demovieworderhooks.presenter.package_locations_presenter');
+
+    return $this->render($this->getModuleTemplatePath() . 'tracking.html.twig', [
+        'packageLocations' => $locationsPresenter->present($locations),
+    ]);
+}
+```
+
+### hookDisplayAdminOrderMain — Display Hook
+
+`displayAdminOrderMain` injects a block into the main content column. This example shows filtering a Doctrine collection in PHP before passing it to the template:
+
+```php
+public function hookDisplayAdminOrderMain(array $params)
+{
+    /** @var OrderRepository $orderRepository */
+    $orderRepository = $this->get('prestashop.module.demovieworderhooks.repository.order_repository');
+    /** @var OrdersPresenter $ordersPresenter */
+    $ordersPresenter = $this->get('prestashop.module.demovieworderhooks.presenter.orders_presenter');
+
+    $order = new Order($params['id_order']);
+    /** @var OrderCollection $customerOrdersCollection */
+    $customerOrdersCollection = $orderRepository->getCustomerOrders((int)$order->id_customer, [$order->id]);
+    $onlyDeliveredOrders = $customerOrdersCollection->filter(
+        function (\PrestaShop\Module\DemoViewOrderHooks\DTO\Order $order) {
+            return $order->getOrderStateId() === self::DELIVERED_ORDER_STATE_ID;
+        }
+    );
+
+    return $this->render($this->getModuleTemplatePath() . 'customer_delivered_orders.html.twig', [
+        'currentOrderId' => (int) $params['id_order'],
+        'orders' => $ordersPresenter->present(
+            $onlyDeliveredOrders,
+            (int) $this->context->language->id
+        ),
+    ]);
+}
+```
+
+### hookActionGetAdminOrderButtons — Action Hook
+
+`actionGetAdminOrderButtons` receives an `ActionsBarButtonsCollection` in `$params` and lets your module append buttons to the order action bar. The buttons link to Symfony-generated URLs:
+
+```php
+public function hookActionGetAdminOrderButtons(array $params)
+{
+    $order = new Order($params['id_order']);
+
+    /** @var \Symfony\Bundle\FrameworkBundle\Routing\Router $router */
+    $router = $this->get('router');
+
+    /** @var ActionsBarButtonsCollection $bar */
+    $bar = $params['actions_bar_buttons_collection'];
+
+    $viewCustomerUrl = $router->generate('admin_customers_view', ['customerId' => (int)$order->id_customer]);
+    $bar->add(
+        new ActionsBarButton(
+            'btn-secondary', ['href' => $viewCustomerUrl], 'View customer'
+        )
+    );
+    $bar->add(
+        new ActionsBarButton(
+            'btn-info', ['href' => 'https://www.prestashop.com/'], 'Go to PrestaShop'
+        )
+    );
+    $createAnOrderUrl = $router->generate('admin_orders_create');
+    $bar->add(
+        new ActionsBarButton(
+            'btn-link', ['href' => $createAnOrderUrl], 'Create an order'
+        )
+    );
+}
+```
+
+### hookActionFrontControllerSetVariables — Action Hook (Front Office)
+
+This hook fires on every front-office page and lets you inject or overwrite Smarty template variables, including structured data and meta tags:
+
+```php
+public function hookActionFrontControllerSetVariables($params)
+{
+    if ($this->context->controller->php_self === 'product') {
+        if (isset($params['templateVars']['structured_data']['product'])) {
+            $params['templateVars']['structured_data']['product']['aggregateRating'] = [
+                '@type' => 'AggregateRating',
+                'ratingValue' => 4.8,
+                'reviewCount' => 27,
+                'bestRating' => 5,
+                'worstRating' => 1,
+            ];
+        }
+    }
+
+    if ($this->context->controller->getPageName() === 'category') {
+        $categoryObject = new Category(Tools::getValue('id_category'), $this->context->language->id, $this->context->shop->id);
+        $params['templateVars']['page']['meta']['title'] = $categoryObject->name . ' for the best prices | ' . $this->context->shop->name;
+    }
+}
+```
+
+<Tip>
+For action hooks, `$params` is passed **by value** in the method signature but the arrays inside (like `$params['templateVars']`) are references to the original data structures. Mutating nested array keys directly modifies what PrestaShop will use. You do not need to `return` anything from action hooks.
+</Tip>
